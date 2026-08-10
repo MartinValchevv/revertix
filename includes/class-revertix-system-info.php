@@ -115,6 +115,12 @@ class Revertix_System_Info {
 		$rows[] = array( 'Excluded folders', $excluded );
 		$rows[] = array( 'Storage path', Revertix_Storage::base_dir() );
 		$rows[] = array( 'Storage writable', self::yes_no( Revertix_Storage::is_writable() ) );
+		$rows[] = array(
+			'Storage protection',
+			Revertix_Storage::server_uses_htaccess()
+				? '.htaccess (honoured by this server)'
+				: '.htaccess present but this server does not read it - add a server rule',
+		);
 		$rows[] = array( 'Log auto-delete', $settings['auto_prune'] ? ( (int) $settings['retention_days'] . ' days' ) : 'off' );
 
 		// State counts.

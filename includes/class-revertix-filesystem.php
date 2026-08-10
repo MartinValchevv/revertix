@@ -178,6 +178,41 @@ class Revertix_Filesystem {
 	}
 
 	/**
+	 * Translate a path that lives under $from_root into the same relative spot
+	 * under $to_root.
+	 *
+	 * Used to turn the live-side scan roots into staging-side ones (and back).
+	 * The $root === $from_root case matters: the PRO whole-root area resolves to
+	 * ABSPATH itself, which a plain "starts with <from_root>/" test rejects and
+	 * so silently yields an empty set of scan roots.
+	 *
+	 * @param string $root      Absolute path to translate.
+	 * @param string $from_root Absolute root it currently lives under.
+	 * @param string $to_root   Absolute root to move it to.
+	 * @return string Rebased absolute path (no trailing slash), or '' if $root
+	 *                is not inside $from_root at all.
+	 */
+	public static function rebase_root( $root, $from_root, $to_root ) {
+		$norm = self::normalize( $root );
+		$from = self::normalize( $from_root );
+		$to   = self::normalize( $to_root );
+
+		if ( '' === $norm || '' === $from ) {
+			return '';
+		}
+
+		if ( $norm === $from ) {
+			return $to;
+		}
+
+		if ( 0 === strpos( $norm, $from . '/' ) ) {
+			return self::normalize( $to . '/' . ltrim( substr( $norm, strlen( $from ) ), '/' ) );
+		}
+
+		return '';
+	}
+
+	/**
 	 * Process one chunk of a directory scan.
 	 *
 	 * @param array    $stack     Directory stack (absolute paths) yet to visit.
@@ -533,21 +568,80 @@ class Revertix_Filesystem {
 		}
 
 		/**
-		 * Filter the paths skipped during an import restore.
+		 * Filter the paths skipped during an import restore. Extends the shared
+		 * protected list (which already covers wp-config.php) with the plugin's
+		 * own directories, which a restore must not overwrite from under itself.
 		 *
 		 * @param string[] $skip Files (exact) and directory prefixes (trailing /).
 		 */
 		$skip = apply_filters(
 			'revertix_restore_excludes',
-			array(
-				'wp-config.php',
-				'wp-content/plugins/revertix/',
-				'wp-content/plugins/revertix-pro/',
-				'wp-content/uploads/revertix/',
+			array_merge(
+				self::protected_relatives(),
+				array(
+					'wp-content/plugins/revertix/',
+					'wp-content/plugins/revertix-pro/',
+					'wp-content/uploads/revertix/',
+				)
 			)
 		);
 
 		foreach ( $skip as $pattern ) {
+			if ( '/' === substr( $pattern, -1 ) ) {
+				if ( 0 === strpos( $rel . '/', $pattern ) ) {
+					return true;
+				}
+			} elseif ( $rel === $pattern ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Files that belong to the environment rather than to the site, and that
+	 * Revertix therefore never moves between environments or restores.
+	 *
+	 * wp-config.php is the important one: each environment keeps its own DB
+	 * credentials and - critically for staging - its own table prefix, so moving
+	 * it would point one site at the other's tables.
+	 *
+	 * @return string[] Root-relative paths (forward slashes, no leading slash).
+	 */
+	public static function protected_relatives() {
+		/**
+		 * Filter the files Revertix never syncs or restores.
+		 *
+		 * @param string[] $paths Root-relative paths.
+		 */
+		return (array) apply_filters(
+			'revertix_protected_relatives',
+			array(
+				'wp-config.php',
+			)
+		);
+	}
+
+	/**
+	 * Whether a root-relative path is one Revertix never moves.
+	 *
+	 * @param string $rel Root-relative path (forward slashes).
+	 * @return bool
+	 */
+	public static function is_protected_relative( $rel ) {
+		$rel = ltrim( str_replace( '\\', '/', (string) $rel ), '/' );
+		if ( '' === $rel ) {
+			return true;
+		}
+
+		// Compare case-insensitively: macOS and Windows resolve "WP-Config.php"
+		// to the same file, so an exact match would let a differently-cased entry
+		// through and overwrite the real wp-config.php.
+		$rel = strtolower( $rel );
+
+		foreach ( self::protected_relatives() as $pattern ) {
+			$pattern = strtolower( $pattern );
 			if ( '/' === substr( $pattern, -1 ) ) {
 				if ( 0 === strpos( $rel . '/', $pattern ) ) {
 					return true;

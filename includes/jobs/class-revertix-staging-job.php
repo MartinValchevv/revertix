@@ -248,7 +248,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 			}
 
 			$rel = explode( "\t", rtrim( $line, "\r\n" ) )[0];
-			if ( '' === $rel || 'wp-config.php' === $rel ) {
+			if ( '' === $rel || Revertix_Filesystem::is_protected_relative( $rel ) ) {
 				continue; // Our own wp-config.php is written later.
 			}
 
@@ -374,17 +374,14 @@ class Revertix_Staging_Job extends Revertix_Job {
 
 		$config = (string) file_get_contents( $source ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 
-		// Swap the table prefix.
-		$config = preg_replace(
-			'/(\$table_prefix\s*=\s*)([\'"]).*?\2(\s*;)/',
-			'${1}\'' . $this->state['data']['stg_prefix'] . '\'${3}',
-			$config,
-			1
-		);
+		// Swap the table prefix. Both installs share one database, so this is the
+		// only thing separating them - the result is verified before any write.
+		$prefix = (string) $this->state['data']['stg_prefix'];
+		$config = $this->set_table_prefix( $config, $prefix, $how );
 
 		// Neutralise hard-coded URL/path constants so the staging DB options win.
 		foreach ( array( 'WP_HOME', 'WP_SITEURL', 'WP_CONTENT_URL' ) as $const ) {
-			$config = preg_replace(
+			$config = $this->safe_preg_replace(
 				'/^[ \t]*define\(\s*([\'"])' . $const . '\1.*$/m',
 				'// [revertix] removed ' . $const . ' for staging',
 				$config
@@ -396,11 +393,35 @@ class Revertix_Staging_Job extends Revertix_Job {
 		// two sites' cookies/nonces can't validate against each other.
 		$config = $this->randomize_salts( $config );
 
-		$dest = trailingslashit( $this->state['data']['staging_dir'] ) . 'wp-config.php';
-		if ( false === file_put_contents( $dest, $config ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+		// Never write a config that does not declare the staging prefix: that
+		// would hand the user a second front end wired into the live tables.
+		if ( ! $this->config_declares_prefix( $config, $prefix ) ) {
+			$this->fail(
+				sprintf(
+					/* translators: %s: staging table prefix. */
+					__( 'Could not set the staging table prefix (%s) in wp-config.php, so the staging site would have used the live database tables. Nothing was written. This usually means wp-config.php sets $table_prefix in a way Revertix does not recognise.', 'revertix' ),
+					$prefix
+				)
+			);
+			return;
+		}
+
+		$dest    = trailingslashit( $this->state['data']['staging_dir'] ) . 'wp-config.php';
+		$written = file_put_contents( $dest, $config ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		if ( false === $written || $written < 1 ) {
 			$this->fail( __( 'Could not write the staging wp-config.php.', 'revertix' ) );
 			return;
 		}
+
+		Revertix_Log::info(
+			'Staging wp-config.php written.',
+			array(
+				'job'    => $this->id,
+				'slug'   => $this->state['data']['slug'],
+				'prefix' => $prefix,
+				'method' => $how,
+			)
+		);
 
 		$this->state['message'] = __( 'Configuring staging…', 'revertix' );
 		$this->advance_stage();
@@ -695,8 +716,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 	 * @return bool
 	 */
 	protected function server_uses_htaccess() {
-		$software = isset( $_SERVER['SERVER_SOFTWARE'] ) ? strtolower( sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) ) ) : '';
-		return ( false !== strpos( $software, 'apache' ) ) || ( false !== strpos( $software, 'litespeed' ) );
+		return Revertix_Storage::server_uses_htaccess();
 	}
 
 	/**
@@ -741,6 +761,127 @@ class Revertix_Staging_Job extends Revertix_Job {
 		return '';
 	}
 
+	/**
+	 * preg_replace that never turns the subject into null.
+	 *
+	 * On a PCRE failure preg_replace returns null; assigning that back over the
+	 * config would silently produce an empty file, so keep the original instead.
+	 *
+	 * @param string $pattern     Pattern.
+	 * @param string $replacement Replacement.
+	 * @param string $subject     Subject.
+	 * @param int    $limit       Max replacements (-1 = all).
+	 * @return string
+	 */
+	protected function safe_preg_replace( $pattern, $replacement, $subject, $limit = -1 ) {
+		$out = preg_replace( $pattern, $replacement, $subject, $limit );
+		return ( null === $out ) ? $subject : (string) $out;
+	}
+
+	/**
+	 * Matches a whole `$table_prefix = …;` statement whatever the right-hand side
+	 * is: a literal, a constant, a concatenation or a getenv()-style call.
+	 * Line-anchored, so commented-out assignments are left alone.
+	 */
+	const TABLE_PREFIX_RE = '/^[ \t]*\$table_prefix\s*=\s*[^;]+;/m';
+
+	/**
+	 * Force the staging table prefix into a wp-config.php.
+	 *
+	 * Rewrites every existing assignment; if the file declares the prefix in a
+	 * form we cannot match, appends our own instead - the last assignment before
+	 * wp-settings.php is the one PHP uses.
+	 *
+	 * @param string $config wp-config.php contents.
+	 * @param string $prefix Staging table prefix.
+	 * @param string $how    Set to 'replace', 'append' or 'none' (out param).
+	 * @return string
+	 */
+	protected function set_table_prefix( $config, $prefix, &$how = null ) {
+		$how       = 'none';
+		$statement = "\$table_prefix = '" . addcslashes( $prefix, "'\\" ) . "';";
+
+		if ( preg_match( self::TABLE_PREFIX_RE, $config ) ) {
+			$replaced = preg_replace_callback(
+				self::TABLE_PREFIX_RE,
+				static function () use ( $statement ) {
+					return $statement;
+				},
+				$config
+			);
+			if ( null !== $replaced ) {
+				$config = (string) $replaced;
+				$how    = 'replace';
+			}
+		}
+
+		if ( $this->config_declares_prefix( $config, $prefix ) ) {
+			return $config;
+		}
+
+		// Fall back to appending, as late as possible but before wp-settings.php.
+		$line = "\n// [revertix] staging table prefix (Revertix could not rewrite the original assignment).\n" . $statement . "\n";
+
+		$anchors = array(
+			'/^[ \t]*\/\*[^\n]*stop editing[^\n]*\*\/[ \t]*$/mi',
+			'/^[ \t]*(require|include)(_once)?[^\n;]*wp-settings\.php[^\n;]*;[ \t]*$/mi',
+			'/\?>\s*$/',
+		);
+
+		foreach ( $anchors as $anchor ) {
+			if ( ! preg_match( $anchor, $config ) ) {
+				continue;
+			}
+			$out = preg_replace_callback(
+				$anchor,
+				static function ( $m ) use ( $line ) {
+					return $line . $m[0];
+				},
+				$config,
+				1
+			);
+			if ( null !== $out ) {
+				$config = (string) $out;
+				$how    = 'append';
+			}
+			break;
+		}
+
+		if ( ! $this->config_declares_prefix( $config, $prefix ) ) {
+			// No anchor matched: last resort, end of file.
+			$config = rtrim( $config, "\r\n" ) . "\n" . $line;
+			$how    = 'append';
+		}
+
+		return $config;
+	}
+
+	/**
+	 * Whether the config's effective table prefix is the one we want: the last
+	 * assignment wins, and it must be a plain quoted literal of our prefix.
+	 *
+	 * @param string $config wp-config.php contents.
+	 * @param string $prefix Expected staging table prefix.
+	 * @return bool
+	 */
+	protected function config_declares_prefix( $config, $prefix ) {
+		if ( '' === (string) $prefix ) {
+			return false;
+		}
+
+		$found = preg_match_all( self::TABLE_PREFIX_RE, (string) $config, $matches );
+		if ( ! $found ) {
+			return false;
+		}
+
+		$last = trim( end( $matches[0] ) );
+
+		return (bool) preg_match(
+			'/^\$table_prefix\s*=\s*([\'"])' . preg_quote( $prefix, '/' ) . '\1\s*;$/',
+			$last
+		);
+	}
+
 	/* ---------------------------------------------------------------------
 	 * Login protection (keep staging private)
 	 * ------------------------------------------------------------------- */
@@ -771,7 +912,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 
 		// Drop any existing single-line defines so ours are authoritative.
 		foreach ( $keys as $key ) {
-			$config = preg_replace(
+			$config = $this->safe_preg_replace(
 				'/^[ \t]*define\(\s*([\'"])' . $key . '\1\s*,.*$/m',
 				'',
 				$config
@@ -791,7 +932,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 		// wp-settings.php, so the constants are defined in time). Use a callback so
 		// the random values - which may contain $ or \ - are inserted literally.
 		if ( preg_match( '/^[ \t]*\$table_prefix\s*=/m', $config ) ) {
-			$config = preg_replace_callback(
+			$out = preg_replace_callback(
 				'/^([ \t]*\$table_prefix\s*=)/m',
 				static function ( $m ) use ( $block ) {
 					return $block . "\n" . $m[1];
@@ -800,7 +941,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 				1
 			);
 		} else {
-			$config = preg_replace_callback(
+			$out = preg_replace_callback(
 				'/^<\?php/',
 				static function ( $m ) use ( $block ) {
 					return $m[0] . "\n" . $block;
@@ -810,7 +951,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 			);
 		}
 
-		return $config;
+		return ( null === $out ) ? $config : (string) $out;
 	}
 
 	/**

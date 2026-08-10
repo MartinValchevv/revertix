@@ -75,11 +75,15 @@ class Revertix_Storage {
 		$base = self::base_dir();
 		wp_mkdir_p( $base );
 
-		foreach ( array( 'tmp', 'backups', 'packages', 'logs' ) as $sub ) {
-			wp_mkdir_p( self::sub_dir( $sub ) );
-		}
-
 		self::harden( $base );
+
+		// Harden each subdirectory too, so a server that ignores the parent's
+		// rules still meets one in the directory actually being requested.
+		foreach ( array( 'tmp', 'backups', 'packages', 'logs' ) as $sub ) {
+			$dir = self::sub_dir( $sub );
+			wp_mkdir_p( $dir );
+			self::harden( $dir );
+		}
 
 		// Stable random token used when building public-facing package paths.
 		if ( ! get_option( self::OPTION_TOKEN ) ) {
@@ -106,6 +110,55 @@ class Revertix_Storage {
 		if ( ! file_exists( $index ) ) {
 			@file_put_contents( $index, '' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.WP.AlternativeFunctions
 		}
+
+		// index.php as well: some servers are configured to serve index.php ahead
+		// of index.html, and a directory listing here would expose backup names.
+		$index_php = $dir . 'index.php';
+		if ( ! file_exists( $index_php ) ) {
+			@file_put_contents( $index_php, "<?php\n// Silence is golden.\n" ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.WP.AlternativeFunctions
+		}
+	}
+
+	/**
+	 * Whether the web server reads .htaccess files.
+	 *
+	 * Everything under the storage directory is protected by .htaccess, which is
+	 * inert on nginx - there the only thing standing between a visitor and a
+	 * backup archive (which contains wp-config.php) is the unguessable path.
+	 *
+	 * @return bool
+	 */
+	public static function server_uses_htaccess() {
+		$software = isset( $_SERVER['SERVER_SOFTWARE'] )
+			? strtolower( sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) ) )
+			: '';
+
+		$uses = ( false !== strpos( $software, 'apache' ) ) || ( false !== strpos( $software, 'litespeed' ) );
+
+		/**
+		 * Filter whether .htaccess protects the storage directory. Hosts running
+		 * nginx in front of Apache should return true.
+		 *
+		 * @param bool   $uses     Whether .htaccess rules are honoured.
+		 * @param string $software The SERVER_SOFTWARE string, lowercased.
+		 */
+		return (bool) apply_filters( 'revertix_server_uses_htaccess', $uses, $software );
+	}
+
+	/**
+	 * The web-root-relative path of the storage directory, for the nginx snippet.
+	 *
+	 * @return string
+	 */
+	public static function public_relative_dir() {
+		$uploads = wp_upload_dir();
+		if ( empty( $uploads['baseurl'] ) ) {
+			return '/wp-content/uploads/revertix/';
+		}
+
+		$path = wp_parse_url( $uploads['baseurl'], PHP_URL_PATH );
+
+		return trailingslashit( $path ? $path : '/wp-content/uploads' ) . 'revertix/';
 	}
 
 	/**

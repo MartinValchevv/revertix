@@ -3,9 +3,9 @@ Contributors: nitramix, martinvalchev
 Donate link: https://nitramix.com/donate/
 Tags: backup, migration, staging, clone, restore
 Requires at least: 6.2
-Tested up to: 7.0.2
+Tested up to: 7.0.3
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -58,7 +58,7 @@ Revertix never tries to do everything in a single request. Cloning, backup, expo
 *   **Staging access control** - Decide which users and roles can reach your staging sites, and set a custom staging admin-bar colour.
 *   **Priority support**.
 
-**[Learn more about Revertix PRO](https://nitramix.com/)**
+**[Learn more about Revertix PRO](https://nitramix.com/projects/revertix/)**
 
 == Installation ==
 
@@ -152,11 +152,22 @@ Always keep your own independent, off-site backups, and test major operations (i
 
 == Changelog ==
 
+= 1.0.1 =
+* **Fixed:** on some hosts a new staging site used the live database instead of its own copy. Everything looked correct in the panel, but changes made on staging were really being made on the live site. Staging sites created from now on are properly separated, and if Revertix cannot guarantee that separation it stops with a clear message instead of building the site.
+* **Fixed:** a few ways a staging site could be set up incorrectly without saying so are now reported as errors.
+* **Added:** on servers that do not read `.htaccess` files (nginx), Revertix now tells you that your backup folder is not protected and gives you the rule to add.
+* **Improved:** every Revertix folder now carries its own protection files instead of relying on the parent folder.
+* Tested with WordPress 7.0.3
+**Release date: August 10, 2026**
+
 = 1.0.0 =
 * First release of Revertix - staging, backups, export/import migration, plugin & theme rollback, settings, and a system info & logs panel. All heavy operations run as resumable, time-budgeted jobs so large sites never hit a PHP timeout.
 **Release date: July 24, 2026**
 
 == Upgrade Notice ==
+
+= 1.0.1 =
+Important fix for staging sites. If you use staging, please update, then delete and re-create any staging site you made before this version.
 
 = 1.0.0 =
 First release of Revertix.

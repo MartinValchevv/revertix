@@ -39,6 +39,37 @@ class Revertix_Admin {
 		add_action( 'admin_enqueue_scripts', array( $this, 'menu_icon_style' ) );
 		add_filter( 'submenu_file', array( $this, 'highlight_submenu' ) );
 		add_filter( 'admin_footer_text', array( $this, 'footer_text' ) );
+		add_action( 'admin_notices', array( $this, 'storage_protection_notice' ) );
+	}
+
+	/**
+	 * Warn, on Revertix's own screens, when the storage directory is protected
+	 * only by .htaccess and the server does not read .htaccess files.
+	 *
+	 * Backup archives contain the whole site root, wp-config.php included, so on
+	 * a pure nginx host the only thing guarding them is the unguessable path.
+	 */
+	public function storage_protection_notice() {
+		if ( ! current_user_can( 'manage_options' ) || Revertix_Storage::server_uses_htaccess() ) {
+			return;
+		}
+
+		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+		if ( ! $screen || false === strpos( (string) $screen->id, self::PAGE_SLUG ) ) {
+			return;
+		}
+
+		$rule = 'location ~* ' . Revertix_Storage::public_relative_dir() . ' { deny all; return 404; }';
+
+		echo '<div class="notice notice-warning"><p>';
+		echo wp_kses_post(
+			sprintf(
+				/* translators: %s: storage directory path. */
+				__( '<strong>Revertix:</strong> your backups live in %s and are protected by an <code>.htaccess</code> file, which your web server does not appear to read. Add the rule below to your server configuration so nobody can download them directly.', 'revertix' ),
+				'<code>' . esc_html( Revertix_Storage::public_relative_dir() ) . '</code>'
+			)
+		);
+		echo '</p><p><code>' . esc_html( $rule ) . '</code></p></div>';
 	}
 
 	/**
