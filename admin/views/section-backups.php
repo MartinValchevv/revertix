@@ -68,7 +68,7 @@ $date_fmt  = get_option( 'date_format' ) . ' ' . get_option( 'time_format' );
 					<span class="revertix-opt__label"><?php esc_html_e( 'Other files in wp-content', 'revertix' ); ?></span>
 				</label>
 
-				<?php if ( array_key_exists( 'root', Revertix_Filesystem::file_areas() ) ) : ?>
+				<?php if ( array_key_exists( 'root', Revertix_Filesystem::file_areas( 'backup' ) ) ) : ?>
 					<label class="revertix-opt">
 						<input type="checkbox" id="revertix-backup-root">
 						<span class="dashicons dashicons-wordpress"></span>
@@ -169,7 +169,7 @@ $date_fmt  = get_option( 'date_format' ) . ' ' . get_option( 'time_format' );
 									' · ',
 									array_filter(
 										array(
-											size_format( (int) $backup['size'] ),
+											revertix_size( (int) $backup['size'] ),
 											implode( ' + ', $parts ),
 											date_i18n( $date_fmt, (int) $backup['created'] ),
 										)

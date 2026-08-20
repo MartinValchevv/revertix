@@ -103,6 +103,41 @@
 		return document.getElementById( id );
 	}
 
+	/**
+	 * Put text on the clipboard, with a fallback for non-secure contexts.
+	 *
+	 * @param {string} text Text to copy.
+	 */
+	function copyText( text ) {
+		var done = function () {
+			UI.toast( i18n.copied, 'success' );
+		};
+		var failed = function () {
+			UI.toast( i18n.copyFailed, 'error' );
+		};
+
+		if ( navigator.clipboard && navigator.clipboard.writeText ) {
+			navigator.clipboard.writeText( text ).then( done, failed );
+			return;
+		}
+
+		var scratch = document.createElement( 'textarea' );
+		scratch.value = text;
+		scratch.setAttribute( 'readonly', '' );
+		scratch.style.position = 'fixed';
+		scratch.style.opacity = '0';
+		document.body.appendChild( scratch );
+		scratch.select();
+
+		try {
+			document.execCommand( 'copy' ) ? done() : failed();
+		} catch ( e ) {
+			failed();
+		}
+
+		document.body.removeChild( scratch );
+	}
+
 	function escapeHtml( str ) {
 		return String( str || '' ).replace( /[&<>"']/g, function ( c ) {
 			return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ c ];
@@ -197,7 +232,14 @@
 					title.parentNode.removeChild( title );
 				}
 
-				overlay.querySelector( '.revertix-dialog__msg' ).textContent = message || '';
+				var msg = overlay.querySelector( '.revertix-dialog__msg' );
+				if ( opts.bodyNode ) {
+					// A caller-supplied body replaces the plain message paragraph, so
+					// the dialog can host real controls instead of only text.
+					msg.parentNode.replaceChild( opts.bodyNode, msg );
+				} else {
+					msg.textContent = message || '';
+				}
 
 				var okBtn = overlay.querySelector( '.revertix-dialog__ok' );
 				okBtn.textContent = opts.okLabel || ( opts.confirm ? ( i18n.confirm || 'Confirm' ) : ( i18n.ok || 'OK' ) );
@@ -641,8 +683,202 @@
 				var del = e.target.closest( '.revertix-package-delete' );
 				if ( del ) {
 					self.remove( del.closest( '.revertix-package' ), del );
+					return;
+				}
+
+				var share = e.target.closest( '.revertix-package-share' );
+				if ( share ) {
+					self.share( share.closest( '.revertix-package' ), share );
+					return;
+				}
+
+				var showShare = e.target.closest( '.revertix-package-showshare' );
+				if ( showShare ) {
+					self.showExisting( showShare.closest( '.revertix-package' ), showShare );
+					return;
+				}
+
+				var unshare = e.target.closest( '.revertix-package-unshare' );
+				if ( unshare ) {
+					self.unshare( unshare.closest( '.revertix-package' ), unshare );
 				}
 			} );
+		},
+
+		/**
+		 * Ask for a public download link.
+		 *
+		 * Opens a dialog holding whatever controls this install offers - the real
+		 * ones with PRO, a disabled preview without - and shows the finished link
+		 * in the same dialog, because it is only ever shown once.
+		 *
+		 * @param {HTMLElement} row Package row.
+		 * @param {HTMLElement} btn The button that was pressed.
+		 */
+		share: function ( row, btn ) {
+			if ( ! row ) {
+				return;
+			}
+
+			var tpl = document.getElementById( 'revertix-share-form-template' );
+			if ( ! tpl || ! tpl.content ) {
+				return;
+			}
+
+			var body = document.createElement( 'div' );
+			body.appendChild( tpl.content.cloneNode( true ) );
+
+			UI.dialog( '', {
+				title: i18n.shareTitle || 'Share this package',
+				confirm: true,
+				bodyNode: body,
+				okLabel: i18n.shareCreate || 'Create link',
+				cancelLabel: i18n.cancel || 'Cancel'
+			} ).then( function ( ok ) {
+				if ( ! ok ) {
+					return;
+				}
+
+				// Disabled fields (the free preview) are skipped, so the server
+				// falls back to its own defaults - which it enforces regardless.
+				var payload = { id: row.getAttribute( 'data-id' ) };
+				Array.prototype.forEach.call(
+					body.querySelectorAll( '[data-share-opt]' ),
+					function ( field ) {
+						if ( field.disabled || '' === field.value ) {
+							return;
+						}
+						payload[ field.getAttribute( 'data-share-opt' ) ] = field.value;
+					}
+				);
+
+				btn.disabled = true;
+
+				return post( 'revertix_share_package', payload )
+					.then( function ( res ) {
+						btn.disabled = false;
+
+						if ( ! res || ! res.success ) {
+							UI.toast( ( res && res.data && res.data.message ) || i18n.failed, 'error' );
+							return;
+						}
+
+						btn.hidden = true;
+						row.querySelector( '.revertix-package-showshare' ).hidden = false;
+						row.querySelector( '.revertix-package-unshare' ).hidden = false;
+
+						Packages.showLink( res.data.url, res.data.expires );
+					} )
+					.catch( function ( err ) {
+						btn.disabled = false;
+						UI.toast( ( err && err.message ) || i18n.failed, 'error' );
+					} );
+			} );
+		},
+
+		/**
+		 * Show a freshly created link, with a copy button. This is the only time
+		 * it can be read: the server keeps a hash of it, never the link itself.
+		 *
+		 * @param {string} url     The share URL.
+		 * @param {string} expires Human-readable expiry, or ''.
+		 */
+		showLink: function ( url, expires, existing ) {
+			var body = document.createElement( 'div' );
+			body.className = 'revertix-share-result';
+
+			var warn = document.createElement( 'p' );
+			warn.className = 'revertix-hint revertix-hint--warn';
+			warn.textContent = i18n.shareCaution || '';
+
+			var input = document.createElement( 'input' );
+			input.type = 'text';
+			input.className = 'revertix-input revertix-share-result__link';
+			input.readOnly = true;
+			input.value = url;
+			input.addEventListener( 'focus', function () {
+				input.select();
+			} );
+
+			body.appendChild( warn );
+			body.appendChild( input );
+
+			if ( expires ) {
+				var exp = document.createElement( 'span' );
+				exp.className = 'revertix-share-result__exp';
+				exp.textContent = ( i18n.shareExpires || 'Expires' ) + ': ' + expires;
+				body.appendChild( exp );
+			}
+
+			UI.dialog( '', {
+				title: i18n.shareReady || 'Your download link',
+				confirm: false,
+				bodyNode: body,
+				okLabel: i18n.copy || 'Copy'
+			} ).then( function () {
+				copyText( url );
+			} );
+
+			window.setTimeout( function () {
+				input.focus();
+			}, 60 );
+		},
+
+		/**
+		 * Show the link that already exists for this package.
+		 *
+		 * @param {HTMLElement} row Package row.
+		 * @param {HTMLElement} btn The button that was pressed.
+		 */
+		showExisting: function ( row, btn ) {
+			if ( ! row ) {
+				return;
+			}
+
+			btn.disabled = true;
+
+			post( 'revertix_show_share', { id: row.getAttribute( 'data-id' ) } )
+				.then( function ( res ) {
+					btn.disabled = false;
+
+					if ( ! res || ! res.success ) {
+						UI.toast( ( res && res.data && res.data.message ) || i18n.failed, 'error' );
+						return;
+					}
+
+					Packages.showLink( res.data.url, res.data.expires, true );
+				} )
+				.catch( function ( err ) {
+					btn.disabled = false;
+					UI.toast( ( err && err.message ) || i18n.failed, 'error' );
+				} );
+		},
+
+		/**
+		 * Withdraw the public link.
+		 *
+		 * @param {HTMLElement} row Package row.
+		 * @param {HTMLElement} btn The button that was pressed.
+		 */
+		unshare: function ( row, btn ) {
+			if ( ! row ) {
+				return;
+			}
+
+			btn.disabled = true;
+
+			post( 'revertix_unshare_package', { id: row.getAttribute( 'data-id' ) } )
+				.then( function () {
+					btn.disabled = false;
+					btn.hidden = true;
+					row.querySelector( '.revertix-package-showshare' ).hidden = true;
+					row.querySelector( '.revertix-package-share' ).hidden = false;
+					UI.toast( i18n.linkRevoked || i18n.done, 'success' );
+				} )
+				.catch( function ( err ) {
+					btn.disabled = false;
+					UI.toast( ( err && err.message ) || i18n.failed, 'error' );
+				} );
 		},
 
 		remove: function ( row, btn ) {
@@ -694,6 +930,8 @@
 				'</div>' +
 				'<div class="revertix-package__actions">' +
 					'<a class="revertix-btn revertix-btn--sm" href="#"><span class="dashicons dashicons-download"></span>' + escapeHtml( i18n.download ) + '</a>' +
+					'<button type="button" class="revertix-btn revertix-btn--sm revertix-package-share"><span class="dashicons dashicons-admin-links"></span>' + escapeHtml( i18n.shareLink ) + '</button>' +
+					'<button type="button" class="revertix-btn revertix-btn--sm revertix-package-unshare" hidden><span class="dashicons dashicons-hidden"></span>' + escapeHtml( i18n.revokeLink ) + '</button>' +
 					'<button type="button" class="revertix-btn revertix-btn--sm revertix-btn--danger revertix-package-delete"><span class="dashicons dashicons-trash"></span>' + escapeHtml( i18n.delete ) + '</button>' +
 				'</div>';
 
@@ -1086,14 +1324,18 @@
 			if ( this.done ) {
 				this.done.hidden = false;
 			}
+			var r = status.result || {};
+
 			if ( this.meta ) {
-				var r = status.result || {};
-				this.meta.textContent = i18n.importDone;
+				this.meta.textContent = r.notice ? r.notice : i18n.importDone;
 			}
+
 			// The DB/files changed underneath us - reload to a clean admin state.
+			// When there is something to read, leave it on screen long enough to
+			// actually be read; it is also in the log either way.
 			window.setTimeout( function () {
 				window.location.reload();
-			}, 1500 );
+			}, r.notice ? 9000 : 1500 );
 		},
 
 		fail: function ( msg ) {

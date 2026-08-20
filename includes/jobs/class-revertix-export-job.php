@@ -60,6 +60,16 @@ class Revertix_Export_Job extends Revertix_Job {
 	}
 
 	/**
+	 * Bytes archived per batch, so one batch stays bounded no matter how large
+	 * the individual files are.
+	 *
+	 * @return int
+	 */
+	protected function bytes_per_chunk() {
+		return (int) apply_filters( 'revertix_export_bytes_per_chunk', 32 * 1024 * 1024 );
+	}
+
+	/**
 	 * Prepare initial data when the job is created.
 	 *
 	 * Reads the (already sanitized) options from state['args']:
@@ -69,13 +79,17 @@ class Revertix_Export_Job extends Revertix_Job {
 	 *   - file_areas    string[]  (area keys; empty = all)
 	 */
 	protected function init() {
+		// This job builds both migration packages and backups; the areas on offer
+		// differ between the two, so the fallback has to follow the destination.
+		$context = ( isset( $this->state['args']['store'] ) && 'backup' === $this->state['args']['store'] ) ? 'backup' : 'export';
+
 		$args = wp_parse_args(
 			$this->state['args'],
 			array(
 				'include_db'    => true,
 				'tables'        => array(),
 				'include_files' => true,
-				'file_areas'    => array_keys( Revertix_Filesystem::file_areas() ),
+				'file_areas'    => array_keys( Revertix_Filesystem::file_areas( $context ) ),
 				'exclude_names' => array(),
 				'plugins_mode'  => 'all',
 				'plugins'       => array(),
@@ -145,6 +159,7 @@ class Revertix_Export_Job extends Revertix_Job {
 			'tables'         => $tables,
 			'table_idx'      => 0,
 			'row_offset'     => 0,
+			'sql_repaired'   => 0,
 			'db_header'      => false,
 			// archive
 			'meta_added'     => false,
@@ -240,12 +255,67 @@ class Revertix_Export_Job extends Revertix_Job {
 		$this->state['message'] = sprintf(
 			/* translators: %s: number of files. */
 			__( 'Scanning files… %s found', 'revertix' ),
-			number_format_i18n( $this->state['data']['files_total'] )
+			revertix_number( $this->state['data']['files_total'] )
 		);
 
 		if ( $result['done'] ) {
+			if ( ! $this->check_free_space() ) {
+				return;
+			}
 			$this->advance_stage();
 		}
+	}
+
+	/**
+	 * Refuse to start archiving when the disk cannot hold the package.
+	 *
+	 * Without this the archive simply stops being written part-way through: the
+	 * job keeps reporting progress and finishes "successfully" with a truncated
+	 * package. Failing up front, with the numbers, is far kinder.
+	 *
+	 * @return bool True when there is room (or we cannot tell).
+	 */
+	protected function check_free_space() {
+		if ( ! function_exists( 'disk_free_space' ) ) {
+			return true;
+		}
+
+		$needed = (int) $this->state['data']['bytes_total'];
+		if ( $needed <= 0 ) {
+			return true;
+		}
+
+		$free = @disk_free_space( Revertix_Storage::base_dir() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $free ) {
+			return true;
+		}
+
+		// Ask for the payload plus 10% headroom for the database dump, the zip
+		// bookkeeping and the move out of the scratch directory at the end.
+		$required = (int) ( $needed * 1.1 );
+		if ( $free >= $required ) {
+			return true;
+		}
+
+		Revertix_Log::error(
+			'Export stopped: not enough free disk space.',
+			array(
+				'job'      => $this->id,
+				'required' => $required,
+				'free'     => (int) $free,
+			)
+		);
+
+		$this->fail(
+			sprintf(
+				/* translators: 1: required space, 2: available space. */
+				__( 'Not enough free disk space to build the package: about %1$s is needed and only %2$s is free. Free up some space, or export fewer areas at a time.', 'revertix' ),
+				revertix_size( $required ),
+				revertix_size( (int) $free )
+			)
+		);
+
+		return false;
 	}
 
 	/* ---------------------------------------------------------------------
@@ -302,6 +372,10 @@ class Revertix_Export_Job extends Revertix_Job {
 				Revertix_Database::rows_per_chunk()
 			);
 
+			if ( ! empty( $chunk['repaired'] ) ) {
+				$this->state['data']['sql_repaired'] += (int) $chunk['repaired'];
+			}
+
 			if ( '' !== $chunk['sql'] ) {
 				fwrite( $fh, $chunk['sql'] );
 			}
@@ -337,8 +411,111 @@ class Revertix_Export_Job extends Revertix_Job {
 		$manifest = Revertix_Manifest::build( $this->state['data']['tables'] );
 		file_put_contents( $this->dir() . 'manifest.json', Revertix_Manifest::to_json( $manifest ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 
+		$this->write_reference_wp_config();
+
 		$this->state['message'] = __( 'Building package…', 'revertix' );
 		$this->advance_stage();
+	}
+
+	/**
+	 * Write a safe copy of wp-config.php for the package to carry.
+	 *
+	 * A package without a wp-config.php does not look like a WordPress install:
+	 * tools that set a site up from an archive (Local, most hosting importers)
+	 * find the site root by looking for that file, and a person unpacking it by
+	 * hand loses every custom constant they had - WP_MEMORY_LIMIT, WP_DEBUG, a
+	 * custom content directory, constants a plugin needs to work.
+	 *
+	 * The real file cannot travel as-is: its database credentials belong to the
+	 * environment it came from, and shipping them inside a downloadable archive
+	 * is a leak. So the file is copied with the credentials replaced by
+	 * placeholders and fresh salts generated - the target environment fills in
+	 * its own values (Local does it automatically). Everything else, including
+	 * the table prefix that database.sql depends on, is preserved.
+	 *
+	 * Revertix's own import never restores it (is_restore_excluded), so this
+	 * only ever serves the person handling the package.
+	 */
+	protected function write_reference_wp_config() {
+		if ( empty( $this->state['data']['include_files'] ) ) {
+			return;
+		}
+
+		// Only when the package actually carries the WordPress root. In a
+		// wp-content-only package a wp-config.php would be a loose file nobody
+		// asked for, sitting next to a tree it does not belong to.
+		if ( ! in_array( 'root', (array) $this->state['data']['file_areas'], true ) ) {
+			return;
+		}
+
+		$source = '';
+		foreach ( array( ABSPATH . 'wp-config.php', dirname( ABSPATH ) . '/wp-config.php' ) as $candidate ) {
+			if ( is_file( $candidate ) && is_readable( $candidate ) ) {
+				$source = $candidate;
+				break;
+			}
+		}
+
+		if ( '' === $source ) {
+			return;
+		}
+
+		$config = (string) file_get_contents( $source ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$config = Revertix_Filesystem::sanitize_wp_config( $config );
+
+		// Belt and braces: prove the secrets are gone before letting the file
+		// into a package that gets downloaded and passed around. If anything is
+		// still there, ship no reference config rather than a leaking one.
+		$leaked = $this->config_still_leaks( $config );
+		if ( '' !== $leaked ) {
+			Revertix_Log::warning(
+				'Left the reference wp-config.php out of the package: a value could not be removed.',
+				array(
+					'job'      => $this->id,
+					'constant' => $leaked,
+				)
+			);
+			return;
+		}
+
+		file_put_contents( $this->dir() . 'wp-config.php', $config ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+	}
+
+	/**
+	 * Whether a sanitised wp-config still contains one of this site's secrets.
+	 *
+	 * Compares against the values the running site actually uses, so it catches
+	 * any declaration style the rewriter failed to match.
+	 *
+	 * @param string $config Sanitised contents.
+	 * @return string Name of the first constant still present, or ''.
+	 */
+	protected function config_still_leaks( $config ) {
+		$secrets = array( 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST' );
+
+		foreach ( array( 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT', 'WP_CACHE_KEY_SALT' ) as $key ) {
+			$secrets[] = $key;
+		}
+
+		foreach ( $secrets as $const ) {
+			if ( ! defined( $const ) ) {
+				continue;
+			}
+
+			$value = constant( $const );
+
+			// Short or empty values (an empty password, DB_HOST 'localhost')
+			// cannot be searched for meaningfully without false positives.
+			if ( ! is_string( $value ) || strlen( $value ) < 8 ) {
+				continue;
+			}
+
+			if ( false !== strpos( $config, $value ) ) {
+				return $const;
+			}
+		}
+
+		return '';
 	}
 
 	/* ---------------------------------------------------------------------
@@ -363,6 +540,18 @@ class Revertix_Export_Job extends Revertix_Job {
 					);
 				}
 			}
+
+			// The sanitised wp-config goes INSIDE files/, where the real one would
+			// have been, so unpacking files/ yields a complete, recognisable
+			// WordPress root. Revertix's own import skips it.
+			$reference = $this->dir() . 'wp-config.php';
+			if ( is_file( $reference ) ) {
+				$meta[] = array(
+					'abs'   => $reference,
+					'entry' => 'files/wp-config.php',
+				);
+			}
+
 			Revertix_Zip::add_files( $zip_path, $meta );
 			$this->state['data']['meta_added'] = true;
 		}
@@ -385,7 +574,9 @@ class Revertix_Export_Job extends Revertix_Job {
 
 		$root          = trailingslashit( Revertix_Filesystem::root() );
 		$batch         = array();
+		$batch_bytes   = 0;
 		$per_chunk     = $this->files_per_chunk();
+		$bytes_per_chunk = $this->bytes_per_chunk();
 		$files_total   = max( 1, (int) $this->state['data']['files_total'] );
 
 		while ( $this->time_left() > 3.0 ) {
@@ -411,23 +602,31 @@ class Revertix_Export_Job extends Revertix_Job {
 			$parts = explode( "\t", $line );
 			$rel   = $parts[0];
 
-			$batch[] = array(
+			$batch[]      = array(
 				'abs'   => $root . $rel,
 				'entry' => 'files/' . $rel,
 			);
+			$batch_bytes += isset( $parts[1] ) ? (int) $parts[1] : 0;
 
-			if ( count( $batch ) >= $per_chunk ) {
+			// Flush on file count OR bytes. Counting files alone is not enough:
+			// deep in an uploads folder 200 entries can be several gigabytes, and
+			// since the time budget is only checked between batches, one request
+			// would then run for minutes - long enough for the server to cut it
+			// off, which leaves the browser waiting on a reply that never comes
+			// and the progress bar frozen with no error.
+			if ( count( $batch ) >= $per_chunk || $batch_bytes >= $bytes_per_chunk ) {
 				Revertix_Zip::add_files( $zip_path, $batch );
 				$this->state['data']['files_added'] += count( $batch );
 				$this->state['data']['index_bytes']  = ftell( $fh );
 				$batch                                = array();
+				$batch_bytes                          = 0;
 
 				$this->set_progress( $this->state['data']['files_added'], $files_total );
 				$this->state['message'] = sprintf(
 					/* translators: 1: files archived, 2: total files. */
 					__( 'Archiving files… %1$s of %2$s', 'revertix' ),
-					number_format_i18n( $this->state['data']['files_added'] ),
-					number_format_i18n( $this->state['data']['files_total'] )
+					revertix_number( $this->state['data']['files_added'] ),
+					revertix_number( $this->state['data']['files_total'] )
 				);
 			}
 		}
@@ -489,7 +688,7 @@ class Revertix_Export_Job extends Revertix_Job {
 			Revertix_Backup::add(
 				array(
 					'id'      => $this->id,
-					'name'    => '' !== $this->state['data']['label'] ? $this->state['data']['label'] : $name,
+					'name'    => '' !== $this->state['data']['label'] ? $this->state['data']['label'] : Revertix_Storage::untokenize( $name ),
 					'file'    => $name,
 					'path'    => $dest,
 					'size'    => (int) filesize( $dest ),
@@ -514,7 +713,7 @@ class Revertix_Export_Job extends Revertix_Job {
 						/* translators: 1: backup name, 2: human-readable size. */
 						__( 'The backup “%1$s” finished successfully (%2$s).', 'revertix' ),
 						$name,
-						size_format( (int) $this->state['data']['package_size'] )
+						revertix_size( (int) $this->state['data']['package_size'] )
 					)
 				);
 			}
@@ -522,7 +721,7 @@ class Revertix_Export_Job extends Revertix_Job {
 			Revertix_Package_Registry::add(
 				array(
 					'id'      => $this->id,
-					'name'    => $name,
+					'name'    => Revertix_Storage::untokenize( $name ),
 					'path'    => $dest,
 					'size'    => (int) filesize( $dest ),
 					'created' => time(),
@@ -539,6 +738,18 @@ class Revertix_Export_Job extends Revertix_Job {
 				'files'      => (int) $this->state['data']['files_added'],
 			)
 		);
+
+		// Worth surfacing: it means another plugin has been writing broken values
+		// into this site's database, and the package quietly corrected them.
+		if ( ! empty( $this->state['data']['sql_repaired'] ) ) {
+			Revertix_Log::warning(
+				'Repaired stray WordPress placeholder markers while dumping the database.',
+				array(
+					'job'      => $this->id,
+					'repaired' => (int) $this->state['data']['sql_repaired'],
+				)
+			);
+		}
 
 		$this->complete( __( 'Export complete.', 'revertix' ) );
 	}
@@ -590,7 +801,13 @@ class Revertix_Export_Job extends Revertix_Job {
 	protected function package_filename() {
 		$host = wp_parse_url( home_url(), PHP_URL_HOST );
 		$host = $host ? preg_replace( '/[^a-z0-9\-]/i', '-', $host ) : 'site';
-		return 'revertix-' . $host . '-' . gmdate( 'Ymd-His' ) . '.zip';
+
+		// Lead with the site's own host. Tools that build a site straight from an
+		// archive (Local, most hosting importers) name it after the file, so a
+		// "revertix-" prefix in front would end up as part of the site's name.
+		// The token keeps the file unguessable on servers that ignore .htaccess;
+		// the download endpoint strips it again so the person gets a clean name.
+		return Revertix_Storage::tokenize( $host . '-' . gmdate( 'Ymd-His' ) . '.zip' );
 	}
 
 	/**
@@ -626,8 +843,8 @@ class Revertix_Export_Job extends Revertix_Job {
 		return array(
 			'id'           => $this->id,
 			'download_url' => esc_url_raw( $download_url ),
-			'filename'     => $this->state['data']['package_name'],
-			'size'         => size_format( $this->state['data']['package_size'] ),
+			'filename'     => Revertix_Storage::untokenize( $this->state['data']['package_name'] ),
+			'size'         => revertix_size( $this->state['data']['package_size'] ),
 			'created'      => __( 'Just now', 'revertix' ),
 			'parts_label'  => implode( ' + ', $parts ),
 		);

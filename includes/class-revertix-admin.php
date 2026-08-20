@@ -17,6 +17,11 @@ class Revertix_Admin {
 	const PAGE_SLUG = 'revertix';
 
 	/**
+	 * Option remembering that the storage-protection notice was dismissed.
+	 */
+	const NOTICE_DISMISSED = 'revertix_storage_notice_dismissed';
+
+	/**
 	 * The available tabs: slug => label. Pro add-ons may filter this.
 	 *
 	 * @var array<string,string>
@@ -40,6 +45,7 @@ class Revertix_Admin {
 		add_filter( 'submenu_file', array( $this, 'highlight_submenu' ) );
 		add_filter( 'admin_footer_text', array( $this, 'footer_text' ) );
 		add_action( 'admin_notices', array( $this, 'storage_protection_notice' ) );
+		add_action( 'admin_init', array( $this, 'maybe_dismiss_notice' ) );
 	}
 
 	/**
@@ -50,7 +56,16 @@ class Revertix_Admin {
 	 * a pure nginx host the only thing guarding them is the unguessable path.
 	 */
 	public function storage_protection_notice() {
-		if ( ! current_user_can( 'manage_options' ) || Revertix_Storage::server_uses_htaccess() ) {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		// Nothing to warn about on a machine that is not serving the public.
+		if ( in_array( wp_get_environment_type(), array( 'local', 'development' ), true ) ) {
+			return;
+		}
+
+		if ( Revertix_Storage::server_uses_htaccess() || get_option( self::NOTICE_DISMISSED ) ) {
 			return;
 		}
 
@@ -59,7 +74,11 @@ class Revertix_Admin {
 			return;
 		}
 
-		$rule = 'location ~* ' . Revertix_Storage::public_relative_dir() . ' { deny all; return 404; }';
+		$rule    = 'location ~* ' . Revertix_Storage::public_relative_dir() . ' { deny all; return 404; }';
+		$dismiss = wp_nonce_url(
+			add_query_arg( 'revertix_dismiss', 'storage', admin_url( 'admin.php?page=' . self::PAGE_SLUG ) ),
+			'revertix_dismiss_storage'
+		);
 
 		echo '<div class="notice notice-warning"><p>';
 		echo wp_kses_post(
@@ -69,7 +88,29 @@ class Revertix_Admin {
 				'<code>' . esc_html( Revertix_Storage::public_relative_dir() ) . '</code>'
 			)
 		);
-		echo '</p><p><code>' . esc_html( $rule ) . '</code></p></div>';
+		echo '</p><p><code>' . esc_html( $rule ) . '</code></p>';
+		echo '<p><a href="' . esc_url( $dismiss ) . '">' . esc_html__( 'I have handled this - stop showing it', 'revertix' ) . '</a></p>';
+		echo '</div>';
+	}
+
+	/**
+	 * Remember that the storage-protection notice was dismissed.
+	 */
+	public function maybe_dismiss_notice() {
+		if ( ! isset( $_GET['revertix_dismiss'] ) || 'storage' !== $_GET['revertix_dismiss'] ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			return;
+		}
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		check_admin_referer( 'revertix_dismiss_storage' );
+
+		update_option( self::NOTICE_DISMISSED, 1, false );
+
+		wp_safe_redirect( admin_url( 'admin.php?page=' . self::PAGE_SLUG ) );
+		exit;
 	}
 
 	/**
@@ -253,6 +294,15 @@ class Revertix_Admin {
 					'failed'        => __( 'Something went wrong.', 'revertix' ),
 					'download'      => __( 'Download', 'revertix' ),
 					'delete'        => __( 'Delete', 'revertix' ),
+					'shareLink'     => __( 'Get share link', 'revertix' ),
+					'revokeLink'    => __( 'Revoke link', 'revertix' ),
+					'shareTitle'    => __( 'Share this package', 'revertix' ),
+					'shareCreate'   => __( 'Create link', 'revertix' ),
+					'shareReady'    => __( 'Your download link', 'revertix' ),
+					'shareCaution'  => __( 'Anyone holding this link can download the package. Revoke it when it is no longer needed.', 'revertix' ),
+					'shareExpires'  => __( 'Expires', 'revertix' ),
+					'copy'          => __( 'Copy', 'revertix' ),
+					'linkRevoked'   => __( 'Share link revoked.', 'revertix' ),
 					'confirmDelete' => __( 'Delete this export package? This cannot be undone.', 'revertix' ),
 					'deleting'      => __( 'Deleting…', 'revertix' ),
 					'uploading'     => __( 'Uploading package…', 'revertix' ),

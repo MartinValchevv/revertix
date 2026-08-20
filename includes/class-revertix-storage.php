@@ -120,6 +120,86 @@ class Revertix_Storage {
 	}
 
 	/**
+	 * A per-site random string used to make stored file names unguessable.
+	 *
+	 * nginx has no per-directory configuration, so no file the plugin can write
+	 * will stop it serving what is under uploads/. What DOES work is making the
+	 * names impossible to guess: nothing here is ever linked to, because
+	 * downloads are streamed by an authenticated PHP endpoint, so a name nobody
+	 * can guess is a name nobody can fetch.
+	 *
+	 * @return string
+	 */
+	public static function token() {
+		$token = get_option( self::OPTION_TOKEN );
+
+		if ( ! is_string( $token ) || strlen( $token ) < 12 ) {
+			$token = wp_generate_password( 20, false, false );
+			update_option( self::OPTION_TOKEN, $token, false );
+		}
+
+		return $token;
+	}
+
+	/**
+	 * Append the site token to a file name, before its extension.
+	 *
+	 * @param string $filename e.g. "example-com-20260820-131052.zip".
+	 * @return string          e.g. "example-com-20260820-131052-<token>.zip".
+	 */
+	public static function tokenize( $filename ) {
+		$ext  = pathinfo( $filename, PATHINFO_EXTENSION );
+		$base = ( '' !== $ext ) ? substr( $filename, 0, -( strlen( $ext ) + 1 ) ) : $filename;
+
+		return $base . '-' . self::token() . ( '' !== $ext ? '.' . $ext : '' );
+	}
+
+	/**
+	 * Strip the site token back out, for showing a name to a person.
+	 *
+	 * @param string $filename Stored file name.
+	 * @return string
+	 */
+	public static function untokenize( $filename ) {
+		$token = self::token();
+
+		if ( '' === $token ) {
+			return $filename;
+		}
+
+		return str_replace( '-' . $token, '', $filename );
+	}
+
+	/**
+	 * Clear a .maintenance file that nothing is going to clear itself.
+	 *
+	 * @param int $max_age_seconds How old before it counts as abandoned.
+	 * @return bool Whether a stale file was removed.
+	 */
+	public static function clear_stale_maintenance( $max_age_seconds = 900 ) {
+		$file = trailingslashit( Revertix_Filesystem::root() ) . '.maintenance';
+
+		if ( ! is_file( $file ) ) {
+			return false;
+		}
+
+		$age = time() - (int) filemtime( $file );
+
+		if ( $age < (int) $max_age_seconds ) {
+			return false;
+		}
+
+		wp_delete_file( $file );
+
+		Revertix_Log::warning(
+			'Removed a .maintenance file that was left behind.',
+			array( 'age_seconds' => $age )
+		);
+
+		return true;
+	}
+
+	/**
 	 * Whether the web server reads .htaccess files.
 	 *
 	 * Everything under the storage directory is protected by .htaccess, which is

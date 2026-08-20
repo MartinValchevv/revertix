@@ -153,7 +153,9 @@ class Revertix_Log {
 		if ( '' === $dir ) {
 			return '';
 		}
-		return $dir . 'revertix.log';
+		// Tokenised: on nginx nothing stops this being fetched directly, and a
+		// diagnostic log is the one file here with a name anyone could guess.
+		return $dir . Revertix_Storage::tokenize( 'revertix.log' );
 	}
 
 	/**

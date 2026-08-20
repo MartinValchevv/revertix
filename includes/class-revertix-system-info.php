@@ -454,7 +454,7 @@ class Revertix_System_Info {
 
 		if ( is_object( $wpdb ) && '' !== $db_name ) {
 			$bytes  = self::db_var( $wpdb->prepare( 'SELECT SUM(data_length + index_length) FROM information_schema.tables WHERE table_schema = %s', $db_name ) );
-			$size   = ( '' !== $bytes ) ? size_format( (int) $bytes, 2 ) : 'n/a';
+			$size   = ( '' !== $bytes ) ? revertix_size( (int) $bytes, 2 ) : 'n/a';
 			$tables = self::db_var( $wpdb->prepare( 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s', $db_name ) );
 		}
 
@@ -527,8 +527,8 @@ class Revertix_System_Info {
 		return array(
 			'title' => 'Filesystem',
 			'rows'  => array(
-				array( 'Free disk space', false !== $free ? size_format( (int) $free, 2 ) : 'n/a' ),
-				array( 'Total disk space', false !== $total ? size_format( (int) $total, 2 ) : 'n/a' ),
+				array( 'Free disk space', false !== $free ? revertix_size( (int) $free, 2 ) : 'n/a' ),
+				array( 'Total disk space', false !== $total ? revertix_size( (int) $total, 2 ) : 'n/a' ),
 				array( 'FS method', function_exists( 'get_filesystem_method' ) ? get_filesystem_method() : 'n/a' ),
 				array( 'Temp dir', function_exists( 'sys_get_temp_dir' ) ? sys_get_temp_dir() : 'n/a' ),
 				array( 'WP temp dir', function_exists( 'get_temp_dir' ) ? get_temp_dir() : 'n/a' ),
@@ -751,7 +751,7 @@ class Revertix_System_Info {
 			return '-1' === $raw ? 'unlimited' : $raw;
 		}
 		$bytes = function_exists( 'wp_convert_hr_to_bytes' ) ? wp_convert_hr_to_bytes( $raw ) : 0;
-		return $bytes ? ( $raw . ' (' . number_format_i18n( $bytes ) . ' bytes)' ) : $raw;
+		return $bytes ? ( $raw . ' (' . revertix_number( $bytes ) . ' bytes)' ) : $raw;
 	}
 
 	/**
@@ -790,7 +790,7 @@ class Revertix_System_Info {
 	 * @return string
 	 */
 	protected static function format_bytes_var( $bytes ) {
-		return ( '' === $bytes ) ? '' : size_format( (int) $bytes, 2 );
+		return ( '' === $bytes ) ? '' : revertix_size( (int) $bytes, 2 );
 	}
 
 	/**

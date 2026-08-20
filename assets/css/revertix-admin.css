@@ -203,6 +203,15 @@
 }
 
 /* Buttons ------------------------------------------------------------- */
+/* An explicit `display` beats the `hidden` attribute, which would otherwise
+   leave buttons we mark as hidden fully visible. Restore the attribute's
+   meaning for everything we style. */
+.revertix-btn[hidden],
+.revertix-shareopt[hidden],
+[hidden] {
+	display: none !important;
+}
+
 .revertix-btn {
 	display: inline-flex;
 	align-items: center;
@@ -1163,6 +1172,97 @@
 	justify-content: flex-end;
 }
 
+/* Share dialog: the controls and the finished link both live in the popup. */
+.revertix-share-form {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	text-align: left;
+}
+
+.revertix-shareopt {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+}
+
+.revertix-shareopt__label {
+	color: var(--revertix-muted);
+	font-size: 12px;
+}
+
+.revertix-shareopt__hint {
+	color: var(--revertix-muted);
+	font-size: 11px;
+}
+
+/* Locked (free): rendered so the option is discoverable, plainly out of reach. */
+.revertix-shareopt.revertix-opt--locked {
+	opacity: .55;
+}
+
+.revertix-shareopt.revertix-opt--locked .revertix-input {
+	cursor: not-allowed;
+}
+
+/* The locked preview is one big button into the plans dialog. Disabled fields
+   swallow their own clicks, so let them pass through to the wrapper. */
+.revertix-share-locked {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	padding: 12px;
+	border: 1px dashed var(--revertix-border);
+	border-radius: 8px;
+	cursor: pointer;
+}
+
+.revertix-share-locked:hover {
+	border-color: var(--revertix-primary);
+}
+
+.revertix-share-locked .revertix-input {
+	pointer-events: none;
+}
+
+.revertix-share-locked__note {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0;
+	color: var(--revertix-muted);
+	font-size: 12px;
+}
+
+.revertix-share-form__locked {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0;
+	color: var(--revertix-muted);
+	font-size: 12px;
+}
+
+.revertix-share-result {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	text-align: left;
+}
+
+.revertix-share-result__link {
+	width: 100%;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+}
+
+.revertix-share-result__exp {
+	color: var(--revertix-muted);
+	font-size: 12px;
+}
+
+
 /* Staging environment card spans the full width; Pro cards sit below it. */
 .revertix-staging-card {
 	margin-bottom: 20px;
@@ -1293,7 +1393,9 @@
 .revertix-modal {
 	position: fixed;
 	inset: 0;
-	z-index: 100000;
+	/* Above .revertix-dialog (100002): the plans modal is opened FROM a dialog,
+	   and underneath it the click would look like nothing happened. */
+	z-index: 100003;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -1495,7 +1597,7 @@
 	position: fixed;
 	right: 24px;
 	bottom: 24px;
-	z-index: 100001;
+	z-index: 100004;
 	display: flex;
 	flex-direction: column;
 	gap: 10px;

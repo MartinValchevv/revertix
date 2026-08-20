@@ -54,6 +54,7 @@ $highlights = array(
 		__( 'Auto safety backup before pushing to live', 'revertix' ),
 		__( 'Scheduled automatic backups: monthly & weekly', 'revertix' ),
 		__( 'Snapshots for premium/custom plugins & themes', 'revertix' ),
+		__( 'Export download links: set the expiry, a limit & a password', 'revertix' ),
 		__( 'Restrict staging access by user & role', 'revertix' ),
 		__( 'Custom staging admin-bar colour', 'revertix' ),
 		__( 'Email support', 'revertix' ),

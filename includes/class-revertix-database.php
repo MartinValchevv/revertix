@@ -127,14 +127,22 @@ class Revertix_Database {
 			);
 		}
 
-		$values = array();
+		$values   = array();
+		$repaired = 0;
 		foreach ( $rows as $row ) {
 			$cells = array();
 			foreach ( $row as $value ) {
 				if ( null === $value ) {
 					$cells[] = 'NULL';
 				} else {
-					$cells[] = "'" . $wpdb->_real_escape( $value ) . "'";
+					// _real_escape() ends with add_placeholder_escape(), which swaps
+					// every % for a 66-character marker. That is meant to be undone
+					// by the `query` filter when the query runs - but this string is
+					// written to a .sql FILE and never runs, so the marker has to be
+					// removed here or every % in the site's data is destroyed.
+					$escaped = $wpdb->remove_placeholder_escape( $wpdb->_real_escape( self::repair_placeholder_escape( $value, $repaired ) ) );
+
+					$cells[] = "'" . $escaped . "'";
 				}
 			}
 			$values[] = '(' . implode( ',', $cells ) . ')';
@@ -143,9 +151,43 @@ class Revertix_Database {
 		$sql = 'INSERT INTO `' . self::safe_identifier( $table ) . '` VALUES ' . implode( ",\n", $values ) . ";\n";
 
 		return array(
-			'sql'  => $sql,
-			'rows' => count( $rows ),
+			'sql'      => $sql,
+			'rows'     => count( $rows ),
+			'repaired' => $repaired,
 		);
+	}
+
+	/**
+	 * Undo a WordPress "placeholder escape" that has been left in stored data.
+	 *
+	 * @param mixed $value Column value.
+	 * @param int   $count Incremented by the number of markers replaced.
+	 * @return mixed
+	 */
+	public static function repair_placeholder_escape( $value, &$count = 0 ) {
+		if ( ! is_string( $value ) || false === strpos( $value, '{' ) ) {
+			return $value;
+		}
+
+		/**
+		 * Filter whether stray wpdb placeholder markers are repaired on export.
+		 *
+		 * @param bool $repair Whether to repair.
+		 */
+		if ( ! apply_filters( 'revertix_repair_placeholder_escape', true ) ) {
+			return $value;
+		}
+
+		$replacements = 0;
+		$out          = preg_replace( '/\{[0-9a-f]{64}\}/', '%', $value, -1, $replacements );
+
+		if ( null === $out ) {
+			return $value;
+		}
+
+		$count += (int) $replacements;
+
+		return $out;
 	}
 
 	/**

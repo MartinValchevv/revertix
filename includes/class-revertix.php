@@ -57,9 +57,13 @@ final class Revertix {
 		// scheduled even on sites activated before this feature existed.
 		add_action( Revertix_Log::CRON_HOOK, array( 'Revertix_Log', 'prune' ) );
 		add_action( Revertix_Log::CRON_HOOK, array( 'Revertix_Storage', 'cleanup_tmp' ) );
+		add_action( Revertix_Log::CRON_HOOK, array( 'Revertix_Storage', 'clear_stale_maintenance' ) );
 		Revertix_Log::schedule();
 
 		$this->ajax = new Revertix_Ajax();
+
+		// Public download links for export packages (front end + admin).
+		new Revertix_Share();
 
 		// Admin-bar env badge/switcher runs on the front end too (and on staging).
 		new Revertix_Admin_Bar();

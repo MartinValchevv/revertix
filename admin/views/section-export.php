@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 $zip_ok    = Revertix_Requirements::has_zip_archive();
 $tables    = Revertix_Database::site_tables();
-$areas     = Revertix_Filesystem::file_areas();
+$areas     = Revertix_Filesystem::file_areas( 'export' );
 $packages  = Revertix_Package_Registry::all();
 $date_fmt  = get_option( 'date_format' ) . ' ' . get_option( 'time_format' );
 $plugins   = Revertix_Filesystem::list_area_items( 'plugins' );
@@ -214,7 +214,7 @@ $themes    = Revertix_Filesystem::list_area_items( 'themes' );
 									' · ',
 									array_filter(
 										array(
-											size_format( (int) $pkg['size'] ),
+											revertix_size( (int) $pkg['size'] ),
 											implode( ' + ', $parts ),
 											date_i18n( $date_fmt, (int) $pkg['created'] ),
 										)
@@ -229,13 +229,61 @@ $themes    = Revertix_Filesystem::list_area_items( 'themes' );
 							<span class="dashicons dashicons-download"></span>
 							<?php esc_html_e( 'Download', 'revertix' ); ?>
 						</a>
+						<?php
+						$revertix_share = Revertix_Share::get( $pkg['id'] );
+						// A link made before this version - or on a site with no
+						// OpenSSL - is still valid, it just cannot be read back.
+						$revertix_link = $revertix_share ? Revertix_Share::link( $pkg['id'] ) : null;
+						?>
+						<button type="button" class="revertix-btn revertix-btn--sm revertix-package-share" <?php echo $revertix_share ? 'hidden' : ''; ?>>
+							<span class="dashicons dashicons-admin-links"></span>
+							<?php esc_html_e( 'Get share link', 'revertix' ); ?>
+						</button>
+						<button type="button" class="revertix-btn revertix-btn--sm revertix-package-showshare" <?php echo $revertix_link ? '' : 'hidden'; ?>>
+							<span class="dashicons dashicons-visibility"></span>
+							<?php esc_html_e( 'Show link', 'revertix' ); ?>
+						</button>
+						<button type="button" class="revertix-btn revertix-btn--sm revertix-package-unshare" <?php echo $revertix_share ? '' : 'hidden'; ?>>
+							<span class="dashicons dashicons-hidden"></span>
+							<?php esc_html_e( 'Revoke link', 'revertix' ); ?>
+						</button>
 						<button type="button" class="revertix-btn revertix-btn--sm revertix-btn--danger revertix-package-delete">
 							<span class="dashicons dashicons-trash"></span>
 							<?php esc_html_e( 'Delete', 'revertix' ); ?>
 						</button>
 					</div>
+
 				</div>
 <?php endforeach; ?>
+
+			<?php // The share dialog's body. The real controls belong to the PRO
+			// add-on; without it this shows what they are, plainly out of reach. ?>
+			<template id="revertix-share-form-template">
+				<div class="revertix-share-form">
+					<?php
+					ob_start();
+					/**
+					 * Render the share-link controls (expiry, download cap, password).
+					 *
+					 * Nothing is attached in the free plugin, which is what makes the
+					 * locked preview below show instead.
+					 */
+					do_action( 'revertix_share_form_fields' );
+					$revertix_share_fields = ob_get_clean();
+
+					if ( '' !== trim( (string) $revertix_share_fields ) ) {
+						echo $revertix_share_fields; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped by the add-on that rendered it.
+					} else {
+						require REVERTIX_PLUGIN_DIR . 'admin/views/partial-share-locked.php';
+					}
+					?>
+
+					<p class="revertix-hint revertix-hint--warn">
+						<span class="dashicons dashicons-warning"></span>
+						<?php esc_html_e( 'Anyone holding the link can download the package, and it contains your whole site.', 'revertix' ); ?>
+					</p>
+				</div>
+			</template>
 		</div>
 	</div>
 </section>

@@ -89,6 +89,11 @@ class Revertix_Package_Registry {
 	 * @return bool True if an entry was removed.
 	 */
 	public static function delete( $id ) {
+		// A link must never outlive the file it points at.
+		if ( class_exists( 'Revertix_Share' ) ) {
+			Revertix_Share::revoke( $id );
+		}
+
 		$items = get_option( self::OPTION, array() );
 		if ( ! is_array( $items ) || ! isset( $items[ $id ] ) ) {
 			return false;

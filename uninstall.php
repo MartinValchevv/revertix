@@ -128,6 +128,9 @@ $revertix_options = array(
 	'revertix_log_settings',
 	'revertix_settings',
 	'revertix_rollback_snapshots',
+	'revertix_storage_notice_dismissed',
+	'revertix_shares',
+	'revertix_import_running',
 );
 foreach ( $revertix_options as $revertix_option ) {
 	delete_option( $revertix_option );

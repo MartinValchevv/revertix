@@ -93,7 +93,7 @@ class Revertix_Backup {
 
 			$found[ $id ] = array(
 				'id'      => $id,
-				'name'    => basename( $path ),
+				'name'    => Revertix_Storage::untokenize( basename( $path ) ),
 				'file'    => basename( $path ),
 				'path'    => $path,
 				'size'    => (int) filesize( $path ),

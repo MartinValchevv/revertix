@@ -52,3 +52,38 @@ function revertix_backup_frequency_labels() {
 		'custom'   => __( 'Custom interval (min. 1 hour)', 'revertix' ),
 	);
 }
+
+/**
+ * Turn HTML entities produced by WordPress' number formatting back into real
+ * characters.
+ * 
+ * @param string $text Formatted text.
+ * @return string
+ */
+function revertix_plain_entities( $text ) {
+	return str_replace( '&nbsp;', "\xc2\xa0", (string) $text );
+}
+
+/**
+ * number_format_i18n() that is safe to use outside HTML.
+ *
+ * @param float|int $number   Number to format.
+ * @param int       $decimals Decimal places.
+ * @return string
+ */
+function revertix_number( $number, $decimals = 0 ) {
+	return revertix_plain_entities( number_format_i18n( $number, $decimals ) );
+}
+
+/**
+ * size_format() that is safe to use outside HTML. size_format() formats through
+ * number_format_i18n(), so it carries the same entity.
+ *
+ * @param int|string $bytes    Number of bytes.
+ * @param int        $decimals Decimal places.
+ * @return string Formatted size, or '' when the input is not usable.
+ */
+function revertix_size( $bytes, $decimals = 0 ) {
+	$formatted = size_format( $bytes, $decimals );
+	return ( false === $formatted ) ? '' : revertix_plain_entities( $formatted );
+}

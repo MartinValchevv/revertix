@@ -205,7 +205,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 		$this->state['message'] = sprintf(
 			/* translators: %s: number of files. */
 			__( 'Scanning files… %s found', 'revertix' ),
-			number_format_i18n( $this->state['data']['files_total'] )
+			revertix_number( $this->state['data']['files_total'] )
 		);
 
 		if ( $result['done'] ) {
@@ -278,7 +278,7 @@ class Revertix_Staging_Job extends Revertix_Job {
 				$this->state['message']            = sprintf(
 					/* translators: %s: number of files copied. */
 					__( 'Copying files… %s copied', 'revertix' ),
-					number_format_i18n( $this->state['data']['copied'] )
+					revertix_number( $this->state['data']['copied'] )
 				);
 				$processed = 0;
 			}

@@ -24,6 +24,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Revertix_Import_Job extends Revertix_Job {
 
 	/**
+	 * The must-use plugin that holds the site's plugins back during an import.
+	 */
+	const GUARD_FILE = 'revertix-import-guard.php';
+
+	/**
 	 * {@inheritDoc}
 	 */
 	public static function type_slug() {
@@ -34,7 +39,11 @@ class Revertix_Import_Job extends Revertix_Job {
 	 * {@inheritDoc}
 	 */
 	public function stages() {
-		return array( 'unzip', 'read_manifest', 'import_db', 'restore_files', 'search_replace', 'finalize' );
+		// Files before the database, deliberately. The database carries the source
+		// site's list of active plugins; loading it first tells WordPress to run
+		// plugins whose files have not arrived yet, and the next request dies on a
+		// missing include - taking the import with it.
+		return array( 'unzip', 'read_manifest', 'restore_files', 'import_db', 'search_replace', 'swap_core', 'finalize' );
 	}
 
 	/**
@@ -47,6 +56,7 @@ class Revertix_Import_Job extends Revertix_Job {
 			'import_db'      => __( 'Importing database', 'revertix' ),
 			'restore_files'  => __( 'Restoring files', 'revertix' ),
 			'search_replace' => __( 'Updating URLs', 'revertix' ),
+			'swap_core'      => __( 'Installing WordPress', 'revertix' ),
 			'finalize'       => __( 'Finishing up', 'revertix' ),
 		);
 	}
@@ -108,6 +118,99 @@ class Revertix_Import_Job extends Revertix_Job {
 			'sr_pk'         => array(),
 			'sr_changed'    => 0,
 		);
+
+		$this->start_guard();
+	}
+
+	/**
+	 * Keep every plugin but Revertix switched off until the import is finished.
+	 *
+	 * Ordering the stages carefully is not quite enough on its own: the moment the
+	 * imported database lands, WordPress is told to run the source site's plugins,
+	 * and any one of them that objects to this environment takes down the requests
+	 * that drive the import. So a must-use plugin filters the active list down to
+	 * Revertix for the duration, and finalize removes it.
+	 *
+	 * The guard carries its own expiry, so an import that dies half-way cannot
+	 * leave a site with its plugins permanently switched off. It cannot rely on
+	 * anything in the database: the import replaces that.
+	 */
+	protected function start_guard() {
+		$dir = trailingslashit( Revertix_Filesystem::content_dir() ) . 'mu-plugins/';
+		wp_mkdir_p( $dir );
+
+		$code = <<<'GUARD'
+<?php
+/**
+ * Plugin Name: Revertix import guard
+ * Description: Temporary. Holds this site's plugins back while Revertix restores a package. Removed automatically when the import finishes.
+ */
+
+// Written when the import began. Deliberately a literal rather than an option:
+// an import replaces wp_options part-way through, and a guard that asked the
+// database whether it was still needed would switch itself off at exactly the
+// wrong moment - which is how it first went wrong.
+$revertix_import_started = %d;
+
+add_filter(
+	'option_active_plugins',
+	static function ( $plugins ) use ( $revertix_import_started ) {
+		// Never outlive the import: if this file is somehow left behind, it stops
+		// mattering after an hour rather than disabling the site's plugins for good.
+		if ( ( time() - $revertix_import_started ) > HOUR_IN_SECONDS ) {
+			return $plugins;
+		}
+
+		if ( ! is_array( $plugins ) ) {
+			return $plugins;
+		}
+
+		return array_values(
+			array_filter(
+				$plugins,
+				static function ( $plugin ) {
+					return 0 === strpos( (string) $plugin, 'revertix' );
+				}
+			)
+		);
+	}
+);
+GUARD;
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions
+		@file_put_contents( $dir . self::GUARD_FILE, sprintf( $code, time() ) . "\n" ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/**
+	 * Drop what the imported database says about pending updates.
+	 *
+	 * Those records describe another server at another moment: which plugins had
+	 * updates waiting, where to download them, when the check last ran. WordPress
+	 * trusts them on the very next request and can start installing straight
+	 * away - putting the freshly imported site into maintenance mode before
+	 * anyone has even logged in, and leaving it there if the attempt fails.
+	 *
+	 * Clearing them costs nothing: WordPress simply checks again, against this
+	 * site, in its own time.
+	 */
+	protected function forget_update_state() {
+		foreach ( array( 'update_core', 'update_plugins', 'update_themes' ) as $transient ) {
+			delete_site_transient( $transient );
+		}
+
+		delete_option( 'auto_updater.lock' );
+		delete_option( 'core_updater.lock' );
+	}
+
+	/**
+	 * Let the site's plugins run again.
+	 */
+	protected function end_guard() {
+		$file = trailingslashit( Revertix_Filesystem::content_dir() ) . 'mu-plugins/' . self::GUARD_FILE;
+
+		if ( is_file( $file ) ) {
+			wp_delete_file( $file );
+		}
 	}
 
 	/**
@@ -129,6 +232,9 @@ class Revertix_Import_Job extends Revertix_Job {
 				break;
 			case 'search_replace':
 				$this->step_search_replace();
+				break;
+			case 'swap_core':
+				$this->step_swap_core();
 				break;
 			case 'finalize':
 				$this->step_finalize();
@@ -154,6 +260,14 @@ class Revertix_Import_Job extends Revertix_Job {
 		}
 
 		$dest = $this->state['data']['extract_dir'];
+
+		// The package is unpacked in full before anything is restored, so the
+		// disk has to hold the archive AND its contents at the same time. Running
+		// out mid-way leaves a half-extracted package and a confusing failure.
+		if ( 0 === (int) $this->state['data']['unzip_idx'] && ! $this->check_free_space( $source ) ) {
+			return;
+		}
+
 		wp_mkdir_p( $dest );
 
 		while ( $this->time_left() > 3.0 ) {
@@ -171,8 +285,8 @@ class Revertix_Import_Job extends Revertix_Job {
 			$this->state['message'] = sprintf(
 				/* translators: 1: extracted entries, 2: total entries. */
 				__( 'Extracting package… %1$s of %2$s', 'revertix' ),
-				number_format_i18n( $result['next'] ),
-				number_format_i18n( $result['total'] )
+				revertix_number( $result['next'] ),
+				revertix_number( $result['total'] )
 			);
 
 			if ( $result['next'] >= $result['total'] ) {
@@ -180,6 +294,55 @@ class Revertix_Import_Job extends Revertix_Job {
 				return;
 			}
 		}
+	}
+
+	/**
+	 * Refuse to unpack when the disk cannot hold the extracted package.
+	 *
+	 * @param string $source Absolute path to the package.
+	 * @return bool True when there is room (or we cannot tell).
+	 */
+	protected function check_free_space( $source ) {
+		if ( ! function_exists( 'disk_free_space' ) ) {
+			return true;
+		}
+
+		$size = (int) @filesize( $source ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( $size <= 0 ) {
+			return true;
+		}
+
+		$free = @disk_free_space( Revertix_Storage::base_dir() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $free ) {
+			return true;
+		}
+
+		// Extracted contents are at least the archive size; add headroom for the
+		// database dump and the files copied into place afterwards.
+		$required = (int) ( $size * 1.5 );
+		if ( $free >= $required ) {
+			return true;
+		}
+
+		Revertix_Log::error(
+			'Import stopped: not enough free disk space.',
+			array(
+				'job'      => $this->id,
+				'required' => $required,
+				'free'     => (int) $free,
+			)
+		);
+
+		$this->fail(
+			sprintf(
+				/* translators: 1: required space, 2: available space. */
+				__( 'Not enough free disk space to unpack this package: about %1$s is needed and only %2$s is free. Free up some space and try again.', 'revertix' ),
+				revertix_size( $required ),
+				revertix_size( (int) $free )
+			)
+		);
+
+		return false;
 	}
 
 	/* ---------------------------------------------------------------------
@@ -270,6 +433,24 @@ class Revertix_Import_Job extends Revertix_Job {
 				'replacements' => count( $this->state['data']['search'] ),
 			)
 		);
+
+		// The package's WordPress replaces this site's, so the version can change
+		// - including downwards. That is what restoring a site means, but it is
+		// worth saying out loud rather than leaving to be discovered.
+		$package_wp = isset( $versions['wp'] ) ? (string) $versions['wp'] : '';
+		$this->state['data']['wp_mismatch'] = '';
+
+		if ( '' !== $package_wp && get_bloginfo( 'version' ) !== $package_wp ) {
+			$this->state['data']['wp_mismatch'] = $package_wp;
+
+			Revertix_Log::info(
+				'Package carries a different WordPress version; this site will be moved to it.',
+				array(
+					'package_wp' => $package_wp,
+					'site_wp'    => get_bloginfo( 'version' ),
+				)
+			);
+		}
 
 		$this->state['message'] = __( 'Reading package…', 'revertix' );
 		$this->advance_stage();
@@ -371,10 +552,15 @@ class Revertix_Import_Job extends Revertix_Job {
 				continue;
 			}
 
-			if ( ! Revertix_Filesystem::is_restore_excluded( $rel ) ) {
+			// WordPress' own files are written to a staging folder rather than
+			// straight over the install: see step_swap_core() for why.
+			$is_core = Revertix_Filesystem::is_core_relative( $rel );
+			$target  = $is_core ? $this->core_stage_dir() . $rel : $site_root . $rel;
+
+			if ( $is_core || ! Revertix_Filesystem::is_restore_excluded( $rel ) ) {
 				$source = $files_root . $rel;
 				if ( is_file( $source ) ) {
-					if ( Revertix_Filesystem::copy_file( $source, $site_root . $rel ) ) {
+					if ( Revertix_Filesystem::copy_file( $source, $target ) ) {
 						++$this->state['data']['restored'];
 					} else {
 						++$this->state['data']['restore_failed'];
@@ -402,7 +588,7 @@ class Revertix_Import_Job extends Revertix_Job {
 				$this->state['message']               = sprintf(
 					/* translators: %s: number of files restored. */
 					__( 'Restoring files… %s copied', 'revertix' ),
-					number_format_i18n( $this->state['data']['restored'] )
+					revertix_number( $this->state['data']['restored'] )
 				);
 				$processed = 0;
 			}
@@ -524,7 +710,181 @@ class Revertix_Import_Job extends Revertix_Job {
 	}
 
 	/* ---------------------------------------------------------------------
-	 * Stage 6: finalize
+	 * Stage 6: swap in the package's WordPress
+	 * ------------------------------------------------------------------- */
+
+	/**
+	 * Where the package's copy of WordPress is assembled before it goes live.
+	 *
+	 * @return string Trailing-slashed absolute path.
+	 */
+	protected function core_stage_dir() {
+		return trailingslashit( Revertix_Filesystem::root() ) . '.revertix-core-new/';
+	}
+
+	/**
+	 * Put the package's WordPress in place of this site's.
+	 *
+	 * The restore cannot simply write these files where they belong. An import
+	 * runs as a series of AJAX requests that WordPress itself serves, so the
+	 * moment wp-settings.php belongs to one release while wp-includes still
+	 * belongs to another, the site stops loading - and with it the requests that
+	 * would have finished the job. That is exactly how an import used to strand
+	 * itself part-way behind a fatal error.
+	 *
+	 * So the files were copied into a staging folder as they were restored, and
+	 * here they are swapped in by renaming, which is one filesystem operation per
+	 * folder rather than thousands per file. The whole swap happens inside this
+	 * single request, so no tick of this job ever sees a half-swapped install.
+	 *
+	 * A visitor could, though: for the moment between renaming wp-includes and
+	 * renaming wp-settings.php, the two belong to different releases. That is
+	 * precisely the situation WordPress' own core updater faces, and it is solved
+	 * the same way - a .maintenance file, so anyone arriving mid-swap is told the
+	 * site is briefly unavailable instead of meeting a fatal error. If this
+	 * request dies half-way the file stays, which is the safe failure: a holding
+	 * page rather than a broken site.
+	 */
+	/**
+	 * {@inheritDoc}
+	 *
+	 * An import that gives up has to undo what it put in place first, or it
+	 * leaves the site behind a holding page with its plugins switched off.
+	 *
+	 * @param string $message Failure message.
+	 */
+	protected function fail( $message ) {
+		$this->end_guard();
+		$this->end_maintenance();
+
+		parent::fail( $message );
+	}
+
+	/**
+	 * Hold visitors on a "briefly unavailable" page while WordPress is swapped.
+	 *
+	 * The same mechanism, and the same file, that core's own updater uses.
+	 */
+	protected function start_maintenance() {
+		$file = trailingslashit( Revertix_Filesystem::root() ) . '.maintenance';
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions
+		@file_put_contents( $file, '<?php $upgrading = ' . time() . '; // [revertix] replacing WordPress' . "\n" ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/**
+	 * Let visitors back in.
+	 */
+	protected function end_maintenance() {
+		$file = trailingslashit( Revertix_Filesystem::root() ) . '.maintenance';
+
+		if ( is_file( $file ) ) {
+			wp_delete_file( $file );
+		}
+	}
+
+	protected function step_swap_core() {
+		$stage = $this->core_stage_dir();
+
+		// A wp-content-only package brings no WordPress with it.
+		if ( ! is_dir( $stage ) ) {
+			$this->advance_stage();
+			return;
+		}
+
+		$root = trailingslashit( Revertix_Filesystem::root() );
+
+		// Refuse to swap in something incomplete: far better to keep the
+		// WordPress that is running than to install half of another one.
+		foreach ( array( 'wp-settings.php', 'wp-includes/version.php', 'wp-includes/functions.php' ) as $proof ) {
+			if ( ! is_file( $stage . $proof ) ) {
+				Revertix_Log::warning(
+					'The package did not contain a complete copy of WordPress; this site keeps its own.',
+					array( 'missing' => $proof )
+				);
+				Revertix_Filesystem::delete_tree( untrailingslashit( $stage ), untrailingslashit( $root ) );
+				$this->advance_stage();
+				return;
+			}
+		}
+
+		$old = $root . '.revertix-core-old/';
+		wp_mkdir_p( $old );
+
+		$this->start_maintenance();
+
+		// Directories first, so wp-includes is already the new one by the time
+		// anything loads the new wp-settings.php.
+		foreach ( array( 'wp-includes', 'wp-admin' ) as $dir ) {
+			if ( ! is_dir( $stage . $dir ) ) {
+				continue;
+			}
+
+			if ( is_dir( $root . $dir ) && ! @rename( $root . $dir, $old . $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$this->end_maintenance();
+				$this->fail(
+					sprintf(
+						/* translators: %s: folder name. */
+						__( 'Could not replace WordPress: the %s folder could not be moved aside. Nothing was changed.', 'revertix' ),
+						$dir
+					)
+				);
+				return;
+			}
+
+			if ( ! @rename( $stage . $dir, $root . $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				@rename( $old . $dir, $root . $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$this->end_maintenance();
+				$this->fail(
+					sprintf(
+						/* translators: %s: folder name. */
+						__( 'Could not replace WordPress: the new %s folder could not be moved into place. The original was put back.', 'revertix' ),
+						$dir
+					)
+				);
+				return;
+			}
+		}
+
+		// Then the loose files, wp-settings.php last of all.
+		$files = array();
+		foreach ( Revertix_Filesystem::core_relatives() as $rel ) {
+			if ( '/' !== substr( $rel, -1 ) && 'wp-settings.php' !== $rel && is_file( $stage . $rel ) ) {
+				$files[] = $rel;
+			}
+		}
+		if ( is_file( $stage . 'wp-settings.php' ) ) {
+			$files[] = 'wp-settings.php';
+		}
+
+		$swapped = 0;
+		foreach ( $files as $rel ) {
+			if ( @rename( $stage . $rel, $root . $rel ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				++$swapped;
+			}
+		}
+
+		Revertix_Filesystem::delete_tree( untrailingslashit( $old ), untrailingslashit( $root ) );
+		Revertix_Filesystem::delete_tree( untrailingslashit( $stage ), untrailingslashit( $root ) );
+
+		$this->end_maintenance();
+
+		$this->state['data']['core_swapped'] = $swapped;
+
+		Revertix_Log::info(
+			'Replaced WordPress with the copy from the package.',
+			array(
+				'files'      => $swapped,
+				'package_wp' => ! empty( $this->state['data']['wp_mismatch'] ) ? $this->state['data']['wp_mismatch'] : get_bloginfo( 'version' ),
+			)
+		);
+
+		$this->state['message'] = __( 'Finishing up…', 'revertix' );
+		$this->advance_stage();
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Stage 7: finalize
 	 * ------------------------------------------------------------------- */
 
 	/**
@@ -536,6 +896,25 @@ class Revertix_Import_Job extends Revertix_Job {
 			rtrim( $this->state['data']['extract_dir'], '/' ),
 			rtrim( $this->dir(), '/' )
 		);
+
+		// A package from a site with a different table prefix carries role and
+		// capability keys named after ITS prefix. Rename them before anything else
+		// happens: until they match this site's prefix every user, including the
+		// administrator, has no capabilities at all and the admin answers "you are
+		// not allowed to access this page".
+		global $wpdb;
+		Revertix_Database::rekey_for_prefix(
+			$wpdb->options,
+			$wpdb->usermeta,
+			$this->state['data']['old_prefix'],
+			$this->state['data']['new_prefix']
+		);
+
+		// Plugins back on, and WordPress out of maintenance if anything left it
+		// there. Both are safe to call when they were never needed.
+		$this->end_guard();
+		$this->end_maintenance();
+		$this->forget_update_state();
 
 		wp_cache_flush();
 
@@ -561,9 +940,19 @@ class Revertix_Import_Job extends Revertix_Job {
 			return array();
 		}
 
-		return array(
+		$result = array(
 			'restored'   => (int) $this->state['data']['restored'],
 			'sr_changed' => (int) $this->state['data']['sr_changed'],
 		);
+
+		if ( ! empty( $this->state['data']['wp_mismatch'] ) ) {
+			$result['notice'] = sprintf(
+				/* translators: %s: WordPress version the package was made on. */
+				__( 'This site now runs WordPress %s, the version the package was made on.', 'revertix' ),
+				$this->state['data']['wp_mismatch']
+			);
+		}
+
+		return $result;
 	}
 }

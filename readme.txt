@@ -3,9 +3,9 @@ Contributors: nitramix, martinvalchev
 Donate link: https://nitramix.com/donate/
 Tags: backup, migration, staging, clone, restore
 Requires at least: 6.2
-Tested up to: 7.0.3
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.0.1
+Stable tag: 1.0.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -26,6 +26,7 @@ Revertix is built to be careful with your data: before any destructive action (l
 *   **Staging** - Create a private staging copy of your live site with one click. Open it, reset it (re-clone from live), or delete it when you are done. Staging copies are login-protected and clearly badged so you always know which environment you are in.
 *   **Backups** - Take a full backup (database + files) any time. Restore, download, or delete backups from one place. A safety backup of the current site is taken automatically before every restore.
 *   **Export / Import** - Package your entire site (database and files) into a single portable .zip, download it, and import it into another WordPress install to migrate or duplicate your site.
+*   **Share a package** - Hand an export to someone who has no account on your site - a developer, your host's support desk - with a private download link. It lasts seven days, you can see it again or withdraw it whenever you like, and it disappears with the package.
 *   **Rollback** - Roll a plugin or theme back to any earlier WordPress.org version straight from your dashboard, with an automatic safety snapshot taken first.
 *   **Settings** - Control safety-backup retention, staging access, email notifications, and whether Revertix removes its data on uninstall.
 *   **System Info & Logs** - A built-in environment report and activity log make it easy to see what happened and to share details with support.
@@ -55,6 +56,7 @@ Revertix never tries to do everything in a single request. Cloning, backup, expo
 *   **Push / Pull sync** - Send changes between staging and live safely. Review every changed file and database row (down to a line-by-line diff) and apply only what you pick - or, on smaller plans, sync everything in one click. A full safety backup of live is always taken before a push.
 *   **Scheduled automatic backups** - Set-and-forget backups on the schedule you choose (monthly, weekly, and more), with configurable retention.
 *   **Snapshots for premium/custom items** - Snapshot plugins and themes that are not on wordpress.org (no public version history) and roll back to any saved snapshot.
+*   **Export download links, controlled** - The free plugin gives every export a private download link. PRO lets you set how long it lives, how many times it may be used, and a password to open it.
 *   **Staging access control** - Decide which users and roles can reach your staging sites, and set a custom staging admin-bar colour.
 *   **Priority support**.
 
@@ -100,6 +102,9 @@ Restoring overwrites the current site's database and files, so Revertix automati
 
 = What happens if something goes wrong with my site? =
 Revertix is built to be careful: it takes an automatic safety backup before destructive actions and always keeps your most recent backup, so most changes are reversible. That said, backup, restore, import, export and sync operations modify and can overwrite your site's files and database, so you use the plugin at your own risk. You remain responsible for keeping your own independent, off-site backups, and we strongly recommend testing major operations (imports, restores, migrations) on a staging copy first. The plugin is provided "as is", without warranty of any kind, and the authors are not liable for any data loss, downtime, or damage - see the Disclaimer below.
+
+= How safe is a share link? =
+The address contains 43 random characters, so it cannot be guessed, and it is never published anywhere - the download is served by WordPress, not by a file sitting at a readable path. It expires after seven days, you can withdraw it at any moment, and it dies when you delete the package. What is stored on your site is encrypted using your site's own security keys, so a copy of your database does not hand anyone a working link. Treat it like a password: whoever holds it can download that package.
 
 = Is the staging site public? =
 No. Staging copies are login-protected, and a badge in the admin bar makes it obvious you are on staging and not on live.
@@ -152,6 +157,18 @@ Always keep your own independent, off-site backups, and test major operations (i
 
 == Changelog ==
 
+= 1.0.2 =
+* **Fixed:** every `%` character in your content was mangled inside exported databases and backups. Percent-encoded values - any slug made from a non-Latin title, encoded URLs - grew to many times their length, and an import could fail outright. Please take a fresh export or backup: anything made before this version carries the damage.
+* **Fixed:** on some hosts a new staging site quietly used the live database instead of its own copy, so changes made on "staging" were really made on the live site. If you have staging sites made before this version, delete and re-create them.
+* **Fixed:** importing a package into a clean install could stop part-way behind a fatal error, and could leave nobody able to reach the admin. Imports now complete on a fresh site and restore it as it was exported - WordPress version included.
+* **Fixed:** exporting a site with a large uploads folder could stop with no error and nothing in the log.
+* **Added:** exports now include the WordPress files, so a package can rebuild a complete site. Whole-root *backups* remain a Revertix PRO feature.
+* **Added:** a private download link for any export, to send to someone with no account on your site. It lasts seven days and can be withdrawn at any time.
+* **Improved:** backups, packages and the log are stored under names nobody can guess, which protects them on servers that ignore `.htaccess`.
+* **Fixed:** file counts and sizes printed a stray HTML code in languages that separate thousands with a space.
+* Tested with WordPress 7.1
+**Release date: August 21, 2026**
+
 = 1.0.1 =
 * **Fixed:** on some hosts a new staging site used the live database instead of its own copy. Everything looked correct in the panel, but changes made on staging were really being made on the live site. Staging sites created from now on are properly separated, and if Revertix cannot guarantee that separation it stops with a clear message instead of building the site.
 * **Fixed:** a few ways a staging site could be set up incorrectly without saying so are now reported as errors.
@@ -165,6 +182,9 @@ Always keep your own independent, off-site backups, and test major operations (i
 **Release date: July 24, 2026**
 
 == Upgrade Notice ==
+
+= 1.0.2 =
+Important data fixes for exports, backups and staging. If you use staging, delete and re-create any site made before this version, and take a fresh backup.
 
 = 1.0.1 =
 Important fix for staging sites. If you use staging, please update, then delete and re-create any staging site you made before this version.

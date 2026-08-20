@@ -72,6 +72,8 @@ class Revertix_Filesystem {
 			$root . 'wp-content/cache/',
 			$root . 'wp-content/upgrade/',
 			$root . 'wp-content/uploads/cache/',
+			$root . '.revertix-core-new/',
+			$root . '.revertix-core-old/',
 		);
 
 		/**
@@ -265,6 +267,14 @@ class Revertix_Filesystem {
 
 				if ( is_file( $abs ) && is_readable( $abs ) ) {
 					$relative = ltrim( substr( self::normalize( $abs ), strlen( self::normalize( $root ) ) ), '/' );
+
+					// wp-config.php belongs to the environment, never to the site:
+					// it is never restored, copied or synced, so indexing it would
+					// only put database credentials inside a package for nothing.
+					if ( self::is_protected_relative( $relative ) ) {
+						continue;
+					}
+
 					$size     = (int) filesize( $abs );
 					fwrite( $index_fh, $relative . "\t" . $size . "\n" );
 					++$files;
@@ -284,16 +294,26 @@ class Revertix_Filesystem {
 	}
 
 	/**
-	 * The selectable file "areas" for Advanced export: key => [label, dir].
+	 * The selectable file "areas": key => [label, dir].
 	 *
-	 * This plugin packages everything inside wp-content (uploads, themes,
-	 * plugins, mu-plugins and the rest of wp-content). Packaging files that
-	 * live OUTSIDE wp-content, in the WordPress root, is provided by the
-	 * separate Revertix PRO add-on, which adds its own area via the filter.
+	 * The five wp-content areas are always available. The whole-root area (WP
+	 * core, index.php, wp-load.php and anything else beside wp-content) depends
+	 * on what the list is FOR:
 	 *
+	 *   - 'export' : always offered. A migration package that cannot carry the
+	 *                WordPress files is only restorable into an install that
+	 *                already has them, which is not what people expect from an
+	 *                export.
+	 *   - 'backup' : offered by the Revertix PRO add-on, which advertises
+	 *                whole-root BACKUPS as one of its features.
+	 *
+	 * Backups and exports run through the same job, so before the context
+	 * existed, gating the area for backups silently removed it from exports too.
+	 *
+	 * @param string $context 'export' or 'backup'.
 	 * @return array<string,array{label:string,dir:string}>
 	 */
-	public static function file_areas() {
+	public static function file_areas( $context = 'backup' ) {
 		$content = Revertix_Filesystem::content_dir();
 		$uploads = wp_upload_dir();
 
@@ -320,13 +340,21 @@ class Revertix_Filesystem {
 			),
 		);
 
+		// WP core and everything else beside wp-content.
+		if ( 'export' === $context ) {
+			$areas['root'] = array(
+				'label' => __( 'WordPress core and other root files', 'revertix' ),
+				'dir'   => self::normalize( self::root() ),
+			);
+		}
+
 		/**
-		 * Filter the selectable backup file areas. Add-ons may add areas
-		 * (e.g. the Revertix PRO add-on adds the whole-root area).
+		 * Filter the selectable file areas.
 		 *
-		 * @param array $areas key => array{label:string,dir:string}.
+		 * @param array  $areas   key => array{label:string,dir:string}.
+		 * @param string $context 'export' or 'backup'.
 		 */
-		return (array) apply_filters( 'revertix_backup_file_areas', $areas );
+		return (array) apply_filters( 'revertix_backup_file_areas', $areas, $context );
 	}
 
 	/**
@@ -336,7 +364,7 @@ class Revertix_Filesystem {
 	 * @return array{roots:string[],excludes:string[]}
 	 */
 	public static function resolve_areas( array $selected ) {
-		$areas    = self::file_areas();
+		$areas    = self::file_areas( 'export' );
 		$selected = array_values( array_intersect( array_keys( $areas ), $selected ) );
 
 		$roots    = array();
@@ -346,7 +374,30 @@ class Revertix_Filesystem {
 		$subareas = array( 'uploads', 'themes', 'mu-plugins', 'plugins' );
 		$content  = self::normalize( self::content_dir() );
 
-		if ( in_array( 'wpcontent', $selected, true ) ) {
+		if ( in_array( 'root', $selected, true ) ) {
+			$roots[] = self::normalize( self::root() );
+
+			foreach ( $subareas as $key ) {
+				if ( ! in_array( $key, $selected, true ) && isset( $areas[ $key ]['dir'] ) && is_dir( $areas[ $key ]['dir'] ) ) {
+					$excludes[] = $areas[ $key ]['dir'];
+				}
+			}
+			if ( ! in_array( 'wpcontent', $selected, true ) && is_dir( $content ) ) {
+				$keep = array();
+				foreach ( $subareas as $key ) {
+					if ( in_array( $key, $selected, true ) && isset( $areas[ $key ]['dir'] ) ) {
+						$keep[] = self::normalize( $areas[ $key ]['dir'] );
+					}
+				}
+
+				foreach ( (array) glob( trailingslashit( $content ) . '*' ) as $child ) {
+					$child = self::normalize( $child );
+					if ( '' !== $child && ! in_array( $child, $keep, true ) ) {
+						$excludes[] = $child;
+					}
+				}
+			}
+		} elseif ( in_array( 'wpcontent', $selected, true ) ) {
 			// All of wp-content, minus any discrete sub-area not selected.
 			$roots[] = $content;
 			foreach ( $subareas as $key ) {
@@ -624,6 +675,69 @@ class Revertix_Filesystem {
 	}
 
 	/**
+	 * The WordPress core files: everything the release ships outside wp-content.
+	 *
+	 * @return string[] Root-relative paths; directories end with a slash.
+	 */
+	public static function core_relatives() {
+		/**
+		 * Filter the WordPress core paths left alone during a restore.
+		 *
+		 * @param string[] $paths Root-relative paths.
+		 */
+		return (array) apply_filters(
+			'revertix_core_relatives',
+			array(
+				'wp-admin/',
+				'wp-includes/',
+				'index.php',
+				'wp-activate.php',
+				'wp-blog-header.php',
+				'wp-comments-post.php',
+				'wp-config-sample.php',
+				'wp-cron.php',
+				'wp-links-opml.php',
+				'wp-load.php',
+				'wp-login.php',
+				'wp-mail.php',
+				'wp-settings.php',
+				'wp-signup.php',
+				'wp-trackback.php',
+				'xmlrpc.php',
+				'license.txt',
+				'readme.html',
+			)
+		);
+	}
+
+	/**
+	 * Whether a root-relative path belongs to WordPress itself.
+	 *
+	 * @param string $rel Root-relative path (forward slashes).
+	 * @return bool
+	 */
+	public static function is_core_relative( $rel ) {
+		$rel = strtolower( ltrim( str_replace( '\\', '/', (string) $rel ), '/' ) );
+
+		if ( '' === $rel ) {
+			return false;
+		}
+
+		foreach ( self::core_relatives() as $pattern ) {
+			$pattern = strtolower( $pattern );
+			if ( '/' === substr( $pattern, -1 ) ) {
+				if ( 0 === strpos( $rel . '/', $pattern ) ) {
+					return true;
+				}
+			} elseif ( $rel === $pattern ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * Whether a root-relative path is one Revertix never moves.
 	 *
 	 * @param string $rel Root-relative path (forward slashes).
@@ -652,6 +766,161 @@ class Revertix_Filesystem {
 		}
 
 		return false;
+	}
+
+	/**
+	 * Strip the environment-specific secrets out of a wp-config.php so a copy of
+	 * it can safely travel inside a downloadable package.
+	 *
+	 * @param string $config wp-config.php contents.
+	 * @return string
+	 */
+	public static function sanitize_wp_config( $config ) {
+		$config = (string) $config;
+
+		$placeholders = array(
+			'DB_NAME'     => 'database_name_here',
+			'DB_USER'     => 'username_here',
+			'DB_PASSWORD' => 'password_here',
+			'DB_HOST'     => 'localhost',
+		);
+
+		foreach ( $placeholders as $const => $value ) {
+			$config = self::replace_config_literal( $config, $const, $value );
+		}
+
+		// Fresh salts: a package must not carry the live site's session secrets.
+		$keys = array(
+			'AUTH_KEY',
+			'SECURE_AUTH_KEY',
+			'LOGGED_IN_KEY',
+			'NONCE_KEY',
+			'AUTH_SALT',
+			'SECURE_AUTH_SALT',
+			'LOGGED_IN_SALT',
+			'NONCE_SALT',
+			// Not part of core's generated block, but plugins set it and it is
+			// still a secret.
+			'WP_CACHE_KEY_SALT',
+		);
+
+		foreach ( $keys as $key ) {
+			$config = self::replace_config_literal( $config, $key, wp_generate_password( 64, true, true ) );
+		}
+
+		$note = "<?php\n// [revertix] Reference copy. Database credentials and security keys were\n"
+			. "// removed for safety - fill in the values for THIS environment (site\n"
+			. "// setup tools such as Local do it for you). Nothing else was changed.\n";
+
+		$out = preg_replace( '/^<\?php/', str_replace( '$', '\\$', $note ), $config, 1 );
+
+		return ( null === $out ) ? $config : $out;
+	}
+
+	/**
+	 * Replace the literal string value of one define() in a wp-config.php.
+	 *
+	 * @param string $config wp-config.php contents.
+	 * @param string $const  Constant name.
+	 * @param string $value  Replacement value.
+	 * @return string
+	 */
+	protected static function replace_config_literal( $config, $const, $value ) {
+		$pattern = '/^([ \t]*(?i:define)\s*\(\s*([\'"])' . preg_quote( $const, '/' ) . '\2\s*,\s*)'
+			. '([\'"])(?:\\\\.|(?!\3).)*\3(\s*\)\s*;)/m';
+
+		$replacement = "'" . addcslashes( $value, "'\\" ) . "'";
+
+		$out = preg_replace_callback(
+			$pattern,
+			static function ( $m ) use ( $replacement ) {
+				return $m[1] . $replacement . $m[4];
+			},
+			$config,
+			1
+		);
+
+		return ( null === $out ) ? $config : $out;
+	}
+
+	/**
+	 * Send a file to the browser as a download.
+	 *
+	 * @param string $path     Absolute path to an existing, readable file.
+	 * @param string $filename Name to offer it under.
+	 */
+	public static function stream_download( $path, $filename ) {
+		$size = (int) filesize( $path );
+
+		$start = 0;
+		$end   = $size - 1;
+
+		$range = isset( $_SERVER['HTTP_RANGE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_RANGE'] ) ) : '';
+		if ( '' !== $range && preg_match( '/^bytes=(\d*)-(\d*)$/', $range, $m ) ) {
+			$from = ( '' !== $m[1] ) ? (int) $m[1] : null;
+			$to   = ( '' !== $m[2] ) ? (int) $m[2] : null;
+
+			if ( null === $from && null !== $to ) {
+				// "last N bytes"
+				$start = max( 0, $size - $to );
+			} elseif ( null !== $from ) {
+				$start = $from;
+				if ( null !== $to ) {
+					$end = min( $to, $size - 1 );
+				}
+			}
+
+			if ( $start > $end || $start >= $size ) {
+				status_header( 416 );
+				header( 'Content-Range: bytes */' . $size );
+				exit;
+			}
+
+			status_header( 206 );
+			header( 'Content-Range: bytes ' . $start . '-' . $end . '/' . $size );
+		}
+
+		$filename = preg_replace( '/[^A-Za-z0-9._-]/', '-', (string) $filename );
+		if ( '' === $filename ) {
+			$filename = 'download.zip';
+		}
+
+		nocache_headers();
+		header( 'Content-Type: application/zip' );
+		header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+		header( 'Accept-Ranges: bytes' );
+		header( 'Content-Length: ' . ( $end - $start + 1 ) );
+
+		// Buffers hold the whole file in memory otherwise.
+		while ( ob_get_level() ) {
+			ob_end_clean();
+		}
+
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+
+		$handle = fopen( $path, 'rb' );
+		if ( false === $handle ) {
+			status_header( 500 );
+			exit;
+		}
+
+		fseek( $handle, $start );
+		$remaining = $end - $start + 1;
+
+		while ( $remaining > 0 && ! feof( $handle ) ) {
+			$chunk = fread( $handle, (int) min( 1048576, $remaining ) );
+			if ( false === $chunk || '' === $chunk ) {
+				break;
+			}
+			echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- binary file body.
+			flush();
+			$remaining -= strlen( $chunk );
+		}
+
+		fclose( $handle );
+		exit;
 	}
 
 	/**

@@ -33,6 +33,9 @@ class Revertix_Ajax {
 		add_action( 'wp_ajax_nopriv_revertix_run_job', array( $this, 'run_job' ) );
 		add_action( 'wp_ajax_revertix_cancel_job', array( $this, 'cancel_job' ) );
 		add_action( 'wp_ajax_revertix_delete_package', array( $this, 'delete_package' ) );
+		add_action( 'wp_ajax_revertix_share_package', array( $this, 'share_package' ) );
+		add_action( 'wp_ajax_revertix_unshare_package', array( $this, 'unshare_package' ) );
+		add_action( 'wp_ajax_revertix_show_share', array( $this, 'show_share' ) );
 		add_action( 'wp_ajax_revertix_upload_chunk', array( $this, 'upload_chunk' ) );
 		add_action( 'wp_ajax_revertix_start_import', array( $this, 'start_import' ) );
 		add_action( 'wp_ajax_revertix_start_staging', array( $this, 'start_staging' ) );
@@ -138,7 +141,7 @@ class Revertix_Ajax {
 				'include_db'    => true,
 				'tables'        => array(),
 				'include_files' => true,
-				'file_areas'    => array_keys( Revertix_Filesystem::file_areas() ),
+				'file_areas'    => array_keys( Revertix_Filesystem::file_areas( 'export' ) ),
 				'exclude_names' => array(),
 				'plugins_mode'  => 'all',
 				'plugins'       => array(),
@@ -158,7 +161,7 @@ class Revertix_Ajax {
 		}
 
 		// File areas.
-		$valid_areas = array_keys( Revertix_Filesystem::file_areas() );
+		$valid_areas = array_keys( Revertix_Filesystem::file_areas( 'export' ) );
 		$areas       = array();
 		if ( isset( $_POST['file_areas'] ) && is_array( $_POST['file_areas'] ) ) {
 			$raw   = array_map( 'sanitize_key', wp_unslash( $_POST['file_areas'] ) );
@@ -231,6 +234,100 @@ class Revertix_Ajax {
 
 		Revertix_Package_Registry::delete( $id );
 		wp_send_json_success( array( 'deleted' => $id ) );
+	}
+
+	/**
+	 * Create a public download link for a package.
+	 *
+	 * The token comes back exactly once: only its hash is stored, so it cannot
+	 * be shown again later.
+	 */
+	public function share_package() {
+		$this->guard_ajax();
+
+		// phpcs:disable WordPress.Security.NonceVerification.Missing -- nonce checked in guard_ajax().
+		$id = isset( $_POST['id'] ) ? Revertix_Job::sanitize_id( sanitize_text_field( wp_unslash( $_POST['id'] ) ) ) : '';
+
+		$args = array();
+		foreach ( $_POST as $key => $value ) {
+			if ( in_array( $key, array( 'action', 'nonce', 'id' ), true ) || ! is_scalar( $value ) ) {
+				continue;
+			}
+			$args[ sanitize_key( $key ) ] = (string) wp_unslash( $value );
+		}
+		// phpcs:enable WordPress.Security.NonceVerification.Missing
+
+		if ( '' === $id ) {
+			wp_send_json_error( array( 'message' => __( 'This package no longer exists.', 'revertix' ) ), 404 );
+		}
+
+		/**
+		 * Filter the options accepted when creating a share link.
+		 *
+		 * @param array  $args Requested options.
+		 * @param string $id   Package id.
+		 */
+		$args = (array) apply_filters( 'revertix_share_request_args', $args, $id );
+
+		$link = Revertix_Share::create( $id, $args );
+
+		if ( is_wp_error( $link ) ) {
+			wp_send_json_error( array( 'message' => $link->get_error_message() ), 404 );
+		}
+
+		wp_send_json_success(
+			array(
+				'url'     => $link['url'],
+				'expires' => $link['expires']
+					? date_i18n( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $link['expires'] )
+					: '',
+			)
+		);
+	}
+
+	/**
+	 * Return the live link for a package, so it can be read again.
+	 */
+	public function show_share() {
+		$this->guard_ajax();
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- nonce checked in guard_ajax().
+		$id = isset( $_POST['id'] ) ? Revertix_Job::sanitize_id( sanitize_text_field( wp_unslash( $_POST['id'] ) ) ) : '';
+
+		$link = '' !== $id ? Revertix_Share::link( $id ) : null;
+
+		if ( ! $link ) {
+			wp_send_json_error(
+				array( 'message' => __( 'This link is still valid but cannot be displayed - it was created before Revertix could store it readably. Revoke it and create a new one to see the address.', 'revertix' ) ),
+				404
+			);
+		}
+
+		wp_send_json_success(
+			array(
+				'url'     => $link['url'],
+				'expires' => $link['expires']
+					? date_i18n( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $link['expires'] )
+					: '',
+			)
+		);
+	}
+
+	/**
+	 * Withdraw a package's public download link.
+	 */
+	public function unshare_package() {
+		$this->guard_ajax();
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- nonce checked in guard_ajax().
+		$id = isset( $_POST['id'] ) ? Revertix_Job::sanitize_id( sanitize_text_field( wp_unslash( $_POST['id'] ) ) ) : '';
+
+		if ( '' === $id ) {
+			wp_send_json_error( array( 'message' => __( 'This package no longer exists.', 'revertix' ) ), 404 );
+		}
+
+		Revertix_Share::revoke( $id );
+		wp_send_json_success( array( 'revoked' => $id ) );
 	}
 
 	/**
@@ -420,7 +517,7 @@ class Revertix_Ajax {
 			$args = array(
 				'include_db'    => true,
 				'include_files' => true,
-				'file_areas'    => array_keys( Revertix_Filesystem::file_areas() ),
+				'file_areas'    => array_keys( Revertix_Filesystem::file_areas( 'backup' ) ),
 			);
 		}
 
@@ -462,10 +559,8 @@ class Revertix_Ajax {
 			}
 		}
 
-		// Only package areas this install actually offers. The whole-root area
-		// is not part of this plugin (the Revertix PRO add-on registers it), so
-		// it is dropped here unless the add-on has added it to file_areas().
-		$areas = array_values( array_intersect( $areas, array_keys( Revertix_Filesystem::file_areas() ) ) );
+		// Only package areas this install actually offers. 
+		$areas = array_values( array_intersect( $areas, array_keys( Revertix_Filesystem::file_areas( 'backup' ) ) ) );
 
 		$include_db = isset( $_POST['backup_db'] ) && '1' === sanitize_text_field( wp_unslash( $_POST['backup_db'] ) );
 		// phpcs:enable WordPress.Security.NonceVerification.Missing
@@ -926,18 +1021,7 @@ class Revertix_Ajax {
 			wp_die( esc_html__( 'Package not found.', 'revertix' ), '', array( 'response' => 404 ) );
 		}
 
-		nocache_headers();
-		header( 'Content-Type: application/zip' );
-		header( 'Content-Disposition: attachment; filename="' . basename( $real ) . '"' );
-		header( 'Content-Length: ' . filesize( $real ) );
-
-		// Flush output buffers so large files stream instead of buffering.
-		while ( ob_get_level() ) {
-			ob_end_clean();
-		}
-
-		readfile( $real ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		exit;
+		Revertix_Filesystem::stream_download( $real, Revertix_Storage::untokenize( basename( $real ) ) );
 	}
 
 	/**
@@ -969,16 +1053,6 @@ class Revertix_Ajax {
 			wp_die( esc_html__( 'Backup not found.', 'revertix' ), '', array( 'response' => 404 ) );
 		}
 
-		nocache_headers();
-		header( 'Content-Type: application/zip' );
-		header( 'Content-Disposition: attachment; filename="' . basename( $real ) . '"' );
-		header( 'Content-Length: ' . filesize( $real ) );
-
-		while ( ob_get_level() ) {
-			ob_end_clean();
-		}
-
-		readfile( $real ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		exit;
+		Revertix_Filesystem::stream_download( $real, Revertix_Storage::untokenize( basename( $real ) ) );
 	}
 }
